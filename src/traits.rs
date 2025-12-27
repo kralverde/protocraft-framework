@@ -143,6 +143,14 @@ pub mod asynchronous {
         async fn async_read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
     }
 
+    pub trait AsyncWrappedReader<P>: AsyncReader<Error = P::Error>
+    where
+        P: AsyncReader + ?Sized,
+    {
+        #[allow(opaque_hidden_inferred_bound)]
+        fn into_parent(self) -> P;
+    }
+
     pub trait AsyncBoundedReader: AsyncReader {
         async fn async_remaining(&self) -> usize;
 
@@ -150,28 +158,24 @@ pub mod asynchronous {
     }
 
     pub trait AsyncBoundableDecompressableReader: AsyncReader {
-        type AsyncBoundedReader<'a>: AsyncBoundedReader<Error = Self::Error>
+        type AsyncBoundedReader: AsyncBoundedReader<Error = Self::Error>
             + AsyncDecompressableReader<Error = Self::Error>
-        where
-            Self: 'a;
+            + AsyncWrappedReader<Self>;
 
-        async fn async_with_bound(&mut self, bound: usize) -> Self::AsyncBoundedReader<'_>;
+        async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader;
     }
 
     pub trait AsyncDecompressableReader: AsyncReader {
-        type AsyncDecompressReader<'a>: AsyncBoundableReader<Error = Self::Error>
-        where
-            Self: 'a;
+        type AsyncDecompressReader: AsyncBoundableReader<Error = Self::Error>
+            + AsyncWrappedReader<Self>;
 
-        async fn async_with_decompression(&mut self) -> Self::AsyncDecompressReader<'_>;
+        async fn async_with_decompression(self) -> Self::AsyncDecompressReader;
     }
 
     pub trait AsyncBoundableReader: AsyncReader {
-        type AsyncBoundedReader<'a>: AsyncBoundedReader<Error = Self::Error>
-        where
-            Self: 'a;
+        type AsyncBoundedReader: AsyncBoundedReader<Error = Self::Error> + AsyncWrappedReader<Self>;
 
-        async fn async_with_bound(&mut self, bound: usize) -> Self::AsyncBoundedReader<'_>;
+        async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader;
     }
 
     pub trait AsyncFromReader: Sized {

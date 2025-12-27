@@ -17,7 +17,7 @@ use crate::traits::{
     asynchronous::{
         AsyncBoundableDecompressableReader, AsyncBoundableReader, AsyncBoundedReader,
         AsyncCompressableWriter, AsyncCompressionWriter, AsyncDecompressableReader,
-        AsyncReadStreamProvider, AsyncWriteStreamProvider,
+        AsyncReadStreamProvider, AsyncWrappedReader, AsyncWriteStreamProvider,
     },
 };
 
@@ -267,16 +267,22 @@ where
     }
 }
 
+impl<R> AsyncWrappedReader<R> for tokio::io::Take<R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn into_parent(self) -> R {
+        self.into_inner()
+    }
+}
+
 impl<R> AsyncBoundableDecompressableReader for R
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncBoundedReader<'a>
-        = tokio::io::Take<&'a mut R>
-    where
-        Self: 'a;
+    type AsyncBoundedReader = tokio::io::Take<R>;
 
-    async fn async_with_bound(&mut self, bound: usize) -> Self::AsyncBoundedReader<'_> {
+    async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
         self.take(bound as u64)
     }
 }
@@ -285,12 +291,9 @@ impl<R> AsyncBoundableReader for R
 where
     R: AsyncRead + Unpin,
 {
-    type AsyncBoundedReader<'a>
-        = tokio::io::Take<&'a mut R>
-    where
-        Self: 'a;
+    type AsyncBoundedReader = tokio::io::Take<R>;
 
-    async fn async_with_bound(&mut self, bound: usize) -> Self::AsyncBoundedReader<'_> {
+    async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
         self.take(bound as u64)
     }
 }
@@ -312,16 +315,22 @@ where
     }
 }
 
+impl<R> AsyncWrappedReader<R> for ac::tokio::bufread::ZlibDecoder<R>
+where
+    R: AsyncBufRead + Unpin,
+{
+    fn into_parent(self) -> R {
+        self.into_inner()
+    }
+}
+
 impl<R> AsyncDecompressableReader for R
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncDecompressReader<'a>
-        = ac::tokio::bufread::ZlibDecoder<&'a mut R>
-    where
-        Self: 'a;
+    type AsyncDecompressReader = ac::tokio::bufread::ZlibDecoder<R>;
 
-    async fn async_with_decompression(&mut self) -> Self::AsyncDecompressReader<'_> {
+    async fn async_with_decompression(self) -> Self::AsyncDecompressReader {
         ac::tokio::bufread::ZlibDecoder::new(self)
     }
 }
