@@ -34,16 +34,15 @@ async fn handle_connection_with_errors(stream: TcpStream) -> Result<(), Error> {
 
         async fn async_handle_packet<R>(
             designator: Self::PacketDesignator,
-            reader: R,
-        ) -> Result<(R, Self::Result), ReadError<R::Error>>
+            reader: &mut R,
+        ) -> Result<Self::Result, ReadError<R::Error>>
         where
             R: AsyncBoundedReader,
         {
             let result = match designator {
                 Handshake::Standard => {
-                    let (reader, _version) = VarInt::async_from_reader(reader).await?;
-                    let (mut reader, string_length) = VarInt::async_from_reader(reader).await?;
-                    let string_length: i32 = string_length.into();
+                    let _version = VarInt::async_from_reader(reader).await?;
+                    let string_length: i32 = VarInt::async_from_reader(reader).await?.into();
                     if string_length < 0 {
                         return Err(ReadError::NegativeLength {
                             name: "handshake_address",
@@ -54,8 +53,7 @@ async fn handle_connection_with_errors(stream: TcpStream) -> Result<(), Error> {
                         .await
                         .map_err(ReadError::StreamError)?;
 
-                    let (reader, intent) = VarInt::async_from_reader(reader).await?;
-                    let intent: i32 = intent.into();
+                    let intent: i32 = VarInt::async_from_reader(reader).await?.into();
                     if intent <= 0 || intent > 3 {
                         return Err(ReadError::BadEnum {
                             name: "intent",
@@ -63,10 +61,9 @@ async fn handle_connection_with_errors(stream: TcpStream) -> Result<(), Error> {
                         });
                     }
 
-                    let result = if intent == 1 { Some(true) } else { Some(false) };
-                    (reader, result)
+                    if intent == 1 { Some(true) } else { Some(false) }
                 }
-                Handshake::Legacy => (reader, None),
+                Handshake::Legacy => None,
             };
             Ok(result)
         }

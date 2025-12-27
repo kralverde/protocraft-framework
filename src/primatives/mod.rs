@@ -42,8 +42,8 @@ macro_rules! build_primative {
         #[cfg(feature = "async")]
         impl $crate::traits::asynchronous::AsyncFromReader for $type {
             async fn async_from_reader<R>(
-                mut reader: R,
-            ) -> Result<(R, Self), $crate::error::ReadError<R::Error>>
+                reader: &mut R,
+            ) -> Result<Self, $crate::error::ReadError<R::Error>>
             where
                 R: $crate::traits::asynchronous::AsyncBoundedReader,
             {
@@ -53,7 +53,7 @@ macro_rules! build_primative {
                     .await
                     .map_err($crate::error::ReadError::StreamError)?;
                 let result = <$type>::from_be_bytes(buf);
-                Ok((reader, result))
+                Ok(result)
             }
         }
     };

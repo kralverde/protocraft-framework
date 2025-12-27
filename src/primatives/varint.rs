@@ -48,18 +48,16 @@ impl FromReader for VarInt {
 
 #[cfg(feature = "async")]
 impl AsyncFromReader for VarInt {
-    async fn async_from_reader<R>(mut reader: R) -> Result<(R, Self), ReadError<R::Error>>
+    async fn async_from_reader<R>(reader: &mut R) -> Result<Self, ReadError<R::Error>>
     where
         R: AsyncBoundedReader,
     {
         let mut value = 0;
         for offset in (0..32).step_by(7) {
-            let (_reader, byte) = u8::async_from_reader(reader).await?;
-            reader = _reader;
-            let curr: u32 = byte.into();
+            let curr: u32 = u8::async_from_reader(reader).await?.into();
             value |= (curr & SEGMENT_MASK) << offset;
             if (curr & CONTINUE_MASK_U32) == 0 {
-                return Ok((reader, VarInt(value as i32)));
+                return Ok(VarInt(value as i32));
             }
         }
 

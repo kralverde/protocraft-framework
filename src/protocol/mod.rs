@@ -303,10 +303,10 @@ mod asynchronous {
             let mut reader = self.provider.async_read_stream().await;
             let packet_length: i32 = {
                 // 3-Byte VarInts are the maximum allowed for packet lengths
-                let local_reader = reader.async_with_bound(3).await;
-                let (local_reader, result) = VarInt::async_from_reader(local_reader).await?;
+                let mut local_reader = reader.async_with_bound(3).await;
+                let result = VarInt::async_from_reader(&mut local_reader).await?.into();
                 reader = local_reader.into_parent();
-                result.into()
+                result
             };
 
             if packet_length < 0 {
@@ -319,27 +319,19 @@ mod asynchronous {
                 // VarInt interpretation of legacy ping handshake prefix
 
                 // Bound the stream to sane default (the 1.7+ maximum packet size)
-                let local_reader = reader.async_with_bound(MAX_PACKET_SIZE).await;
-                let (_local_reader, result) =
-                    H::async_handle_packet(Handshake::Legacy, local_reader).await?;
+                let mut local_reader = reader.async_with_bound(MAX_PACKET_SIZE).await;
+                H::async_handle_packet(Handshake::Legacy, &mut local_reader).await
                 // TODO: Figure out a way to properly bound this so end-users don't need to worry about
                 // properly handling the packet, will eventually need to do this for legacy packets
                 // anyway
-                Ok(result)
             } else {
                 // SAFETY: We validated that `packet_length` >= 0.
-                let mut local_reader = reader.async_with_bound(packet_length as usize).await;
-                let packet_id: i32 = {
-                    let (_reader, result) = VarInt::async_from_reader(local_reader).await?;
-                    local_reader = _reader;
-                    result.into()
-                };
+                let mut reader = reader.async_with_bound(packet_length as usize).await;
+                let packet_id: i32 = VarInt::async_from_reader(&mut reader).await?.into();
                 if let Some(designator) = S::designator_from_id(packet_id) {
-                    let (_reader, result) =
-                        H::async_handle_packet(designator, local_reader).await?;
-                    local_reader = _reader;
-                    local_reader
-                        .async_discard(local_reader.async_remaining().await)
+                    let result = H::async_handle_packet(designator, &mut reader).await?;
+                    reader
+                        .async_discard(reader.async_remaining().await)
                         .await
                         .map_err(ReadError::StreamError)?;
                     Ok(result)

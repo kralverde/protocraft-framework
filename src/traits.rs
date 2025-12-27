@@ -147,7 +147,6 @@ pub mod asynchronous {
     where
         P: AsyncReader + ?Sized,
     {
-        #[allow(opaque_hidden_inferred_bound)]
         fn into_parent(self) -> P;
     }
 
@@ -179,7 +178,7 @@ pub mod asynchronous {
     }
 
     pub trait AsyncFromReader: Sized {
-        async fn async_from_reader<R>(reader: R) -> Result<(R, Self), ReadError<R::Error>>
+        async fn async_from_reader<R>(reader: &mut R) -> Result<Self, ReadError<R::Error>>
         where
             R: AsyncBoundedReader;
     }
@@ -219,8 +218,8 @@ pub mod asynchronous {
 
         async fn async_handle_packet<R>(
             designator: Self::PacketDesignator,
-            reader: R,
-        ) -> Result<(R, Self::Result), ReadError<R::Error>>
+            reader: &mut R,
+        ) -> Result<Self::Result, ReadError<R::Error>>
         where
             R: AsyncBoundedReader;
     }
