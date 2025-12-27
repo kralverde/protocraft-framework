@@ -161,20 +161,20 @@ pub mod asynchronous {
             + AsyncDecompressableReader<Error = Self::Error>
             + AsyncWrappedReader<Self>;
 
-        async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader;
+        fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader;
     }
 
     pub trait AsyncDecompressableReader: AsyncReader {
         type AsyncDecompressReader: AsyncBoundableReader<Error = Self::Error>
             + AsyncWrappedReader<Self>;
 
-        async fn async_with_decompression(self) -> Self::AsyncDecompressReader;
+        fn with_decompression(self) -> Self::AsyncDecompressReader;
     }
 
     pub trait AsyncBoundableReader: AsyncReader {
         type AsyncBoundedReader: AsyncBoundedReader<Error = Self::Error> + AsyncWrappedReader<Self>;
 
-        async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader;
+        fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader;
     }
 
     pub trait AsyncFromReader: Sized {
@@ -195,7 +195,7 @@ pub mod asynchronous {
         type Level;
         type AsyncCompressionWriter: AsyncCompressionWriter<Error = Self::Error>;
 
-        async fn async_compression_writer(level: Self::Level) -> Self::AsyncCompressionWriter;
+        fn async_compression_writer(level: Self::Level) -> Self::AsyncCompressionWriter;
     }
 
     pub trait AsyncCompressionWriter: AsyncWriter {
@@ -204,9 +204,7 @@ pub mod asynchronous {
         async fn async_into_bytes(self) -> Result<Self::Bytes, Self::Error>;
     }
 
-    pub trait AsyncToWriter {
-        async fn async_size(&self) -> usize;
-
+    pub trait AsyncToWriter: Serializable {
         async fn async_to_writer<W>(&self, writer: &mut W) -> Result<(), WriteError<W::Error>>
         where
             W: AsyncWriter;
@@ -238,7 +236,7 @@ pub mod asynchronous {
         where
             Self: 'a;
 
-        async fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_>;
+        fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_>;
     }
 
     pub trait AsyncWriteStreamProvider: StreamProvider {
@@ -246,6 +244,6 @@ pub mod asynchronous {
         where
             Self: 'a;
 
-        async fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_>;
+        fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_>;
     }
 }

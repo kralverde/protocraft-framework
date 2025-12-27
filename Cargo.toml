@@ -4,27 +4,26 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-sync = [] # extern std
-defaults = ["sync", "cfb8", "aes", "flate2"] # extern std
+sync = [] # std
+defaults = ["sync", "cfb8", "aes", "flate2"] # std
 async = []
-tokio-io = ["tokio"] # extern std
+tokio-io = ["tokio"] # std
 tokio-defaults = [
   "async",
   "tokio-io",
   "cfb8",
   "aes",
-  "flate2",
   "async-compression",
   "async-compression/tokio",
   "async-compression/zlib",
-] # extern std
+] # std
 
 [dependencies]
 tokio = { version = "1.48.0", optional = true, default-features = false }
 cfb8 = { version = "0.8.1", optional = true, default-features = false }
 aes = { version = "0.8.4", optional = true, default-features = false }
 flate2 = { version = "1.1.5", optional = true, default-features = false, features = [
-  "zlib-ng-compat",
+  "rust_backend",
 ] }
 async-compression = { version = "0.4.36", optional = true, default-features = false }
 

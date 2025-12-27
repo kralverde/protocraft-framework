@@ -32,7 +32,6 @@ macro_rules! _build_protocol_state {
     }
 }
 
-// TODO: Make this type-fixed somehow
 #[macro_export]
 macro_rules! _build_protocol_writer {
     ($state:ident, $reciprocal:ident) => {
@@ -49,6 +48,27 @@ macro_rules! _build_protocol_writer {
                 PACKET: $crate::traits::ToWriter,
             {
                 self.write_packet_internal(packet.id(), payload)
+            }
+        }
+
+        #[cfg(feature = "async")]
+        impl<P: $crate::traits::asynchronous::AsyncWriteStreamProvider>
+            $crate::protocol::ProtocolHandler<P, $state>
+        {
+            pub async fn async_write_packet<PACKET>(
+                &mut self,
+                packet: $reciprocal,
+                payload: &PACKET,
+            ) -> Result<
+                (),
+                $crate::error::WriteError<
+                    <P::AsyncBaseWriter<'_> as $crate::traits::asynchronous::AsyncWriter>::Error,
+                >,
+            >
+            where
+                PACKET: $crate::traits::asynchronous::AsyncToWriter,
+            {
+                self.async_write_packet_internal(packet.id(), payload).await
             }
         }
     };

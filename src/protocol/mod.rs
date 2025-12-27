@@ -5,9 +5,8 @@ use crate::{
     primatives::varint::VarInt,
     traits::{
         BoundableDecompressableReader, BoundableReader, BoundedReader, CompressableWriter,
-        CompressionWriter, DecompressableReader, FromReader, HandshakeProtocolState,
-        HasNextProtocolState, ProtocolState, ProtocolStateHandler, ReadStreamProvider, Reader,
-        Serializable, ToWriter, WriteStreamProvider, Writer,
+        CompressionWriter, DecompressableReader, HandshakeProtocolState, HasNextProtocolState,
+        Serializable, Writer,
     },
 };
 
@@ -60,44 +59,123 @@ impl<P, S: HasNextProtocolState> ProtocolHandler<P, S> {
     }
 }
 
-impl<P: ReadStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
-    pub fn read_handshake<H>(
-        &mut self,
-    ) -> Result<H::Result, ReadError<<P::BaseReader<'_> as Reader>::Error>>
-    where
-        H: ProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
-    {
-        let mut reader = self.provider.read_stream();
-        let packet_length: i32 = {
-            // 3-Byte VarInts are the maximum allowed for packet lengths
-            let mut reader = reader.with_bound(3);
-            VarInt::from_reader(&mut reader)?.into()
-        };
+macro_rules! read_handshake_helper {
+    ({$($func:tt)+}) => {
+        impl<P: $crate::traits::ReadStreamProvider, S: $crate::traits::HandshakeProtocolState> ProtocolHandler<P, S> {
+            pub fn read_handshake<H>(
+                &mut self,
+            ) -> Result<H::Result, ReadError<<P::BaseReader<'_> as $crate::traits::Reader>::Error>>
+            where
+                H: $crate::traits::ProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
+            {
+                macro_rules! read_stream {
+                    () => (self.provider.read_stream())
+                }
 
-        if packet_length < 0 {
-            return Err(ReadError::NegativeLength {
-                name: "packet_length",
-            });
+                macro_rules! with_bound {
+                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {{
+                        let mut $r_out = $r_in.with_bound($bound);
+                        $bound_func
+                    }};
+                }
+
+                macro_rules! handle_packet {
+                    ($designator:expr, $reader:ident) => (H::handle_packet($designator, &mut $reader))
+                }
+
+                macro_rules! read {
+                    ($type:ty, $reader:ident) => (<$type as $crate::traits::FromReader>::from_reader(&mut $reader)?)
+                }
+
+                macro_rules! discard_remaining {
+                    ($reader:ident) => {{
+                        let remaining = $reader.remaining();
+                        $reader.discard(remaining).map_err(ReadError::StreamError)?;
+                    }}
+                }
+
+                $($func)+
+            }
         }
 
-        if packet_length == 0xFE {
-            // VarInt interpretation of legacy ping handshake prefix
+        #[cfg(feature = "async")]
+        impl<P: $crate::traits::asynchronous::AsyncReadStreamProvider, S: $crate::traits::HandshakeProtocolState> ProtocolHandler<P, S> {
+            pub async fn async_read_handshake<H>(
+                &mut self,
+            ) -> Result<H::Result, ReadError<<P::AsyncBaseReader<'_> as $crate::traits::asynchronous::AsyncReader>::Error>>
+            where
+                H: $crate::traits::asynchronous::AsyncProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
+            {
+                macro_rules! read_stream {
+                    () => (self.provider.async_read_stream())
+                }
 
-            // Bound the stream to sane default (the 1.7+ maximum packet size)
-            let mut reader = reader.with_bound(MAX_PACKET_SIZE);
-            H::handle_packet(Handshake::Legacy, &mut reader)
+                macro_rules! with_bound {
+                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {
+                    {
+                        #[allow(unused)]
+                        use $crate::traits::asynchronous::{AsyncBoundableReader, AsyncBoundableDecompressableReader, AsyncWrappedReader};
+                        let mut $r_out = $r_in.with_bound($bound);
+                        let result = $bound_func;
+                        $r_in = $r_out.into_parent();
+                        result
+                    }};
+                }
+
+                macro_rules! handle_packet {
+                    ($designator:expr, $reader:ident) => (H::async_handle_packet($designator, &mut $reader).await)
+                }
+
+                macro_rules! read {
+                    ($type:ty, $reader:ident) => (<$type as $crate::traits::asynchronous::AsyncFromReader>::async_from_reader(&mut $reader).await?)
+                }
+
+                macro_rules! discard_remaining {
+                    ($reader:ident) => {{
+                        use $crate::traits::asynchronous::AsyncBoundedReader;
+                        let remaining = $reader.async_remaining().await;
+                        $reader.async_discard(remaining).await.map_err(ReadError::StreamError)?;
+                    }}
+                }
+
+                $($func)+
+            }
+        }
+    };
+}
+
+read_handshake_helper!({
+    let mut reader = read_stream!();
+
+    // 3-Byte VarInts are the maximum allowed for packet lengths
+    let packet_length: i32 = with_bound!(3, reader => varint_reader {
+        read!(VarInt, varint_reader).into()
+    });
+
+    if packet_length < 0 {
+        return Err(ReadError::NegativeLength {
+            name: "packet_length",
+        });
+    }
+
+    // VarInt interpretation of legacy ping handshake prefix
+    if packet_length == 0xFE {
+        // Bound the stream to sane default (the 1.7+ maximum packet size)
+        let result = with_bound!(MAX_PACKET_SIZE, reader => legacy_reader {
+            handle_packet!(Handshake::Legacy, legacy_reader)
             // TODO: Figure out a way to properly bound this so end-users don't need to worry about
             // properly handling the packet, will eventually need to do this for legacy packets
             // anyway
-        } else {
-            // SAFETY: We validated that `packet_length` >= 0.
-            let mut reader = reader.with_bound(packet_length as usize);
-            let packet_id: i32 = VarInt::from_reader(&mut reader)?.into();
+        });
+        let _ = reader;
+        result
+    } else {
+        // SAFETY: We validated that `packet_length` >= 0.
+        let result = with_bound!(packet_length as usize, reader => packet_reader {
+            let packet_id: i32 = read!(VarInt, packet_reader).into();
             if let Some(designator) = S::designator_from_id(packet_id) {
-                let result = H::handle_packet(designator, &mut reader);
-                reader
-                    .discard(reader.remaining())
-                    .map_err(ReadError::StreamError)?;
+                let result = handle_packet!(designator, packet_reader);
+                discard_remaining!(packet_reader);
                 result
             } else {
                 Err(ReadError::UnknownPacket {
@@ -105,55 +183,159 @@ impl<P: ReadStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
                     id: packet_id,
                 })
             }
-        }
+        });
+        let _ = reader;
+        result
     }
+});
+
+macro_rules! read_packet_helper {
+    ({$($func:tt)+}) => {
+        impl<P: $crate::traits::ReadStreamProvider, S: $crate::traits::ProtocolState> ProtocolHandler<P, S> {
+            pub fn read_packet<H>(
+                &mut self,
+            ) -> Result<H::Result, ReadError<<P::BaseReader<'_> as $crate::traits::Reader>::Error>>
+            where
+                H: $crate::traits::ProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
+            {
+                macro_rules! threshold {
+                    () => (self.provider.compression_threshold())
+                }
+
+                macro_rules! read_stream {
+                    () => (self.provider.read_stream())
+                }
+
+                macro_rules! with_bound {
+                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {{
+                        let mut $r_out = $r_in.with_bound($bound);
+                        $bound_func
+                    }};
+                }
+
+                macro_rules! with_decompression {
+                    ($r_in:ident => $r_out:ident $decomp_func:tt) => {{
+                        let mut $r_out = $r_in.with_decompression();
+                        $decomp_func
+                    }};
+                }
+
+                macro_rules! handle_packet {
+                    ($designator:expr, $reader:ident) => (H::handle_packet($designator, &mut $reader))
+                }
+
+                macro_rules! read {
+                    ($type:ty, $reader:ident) => (<$type as $crate::traits::FromReader>::from_reader(&mut $reader)?)
+                }
+
+                macro_rules! discard_remaining {
+                    ($reader:ident) => {{
+                        let remaining = $reader.remaining();
+                        $reader.discard(remaining).map_err(ReadError::StreamError)?;
+                    }};
+                }
+
+                $($func)+
+            }
+        }
+
+        #[cfg(feature = "async")]
+        impl<P: $crate::traits::asynchronous::AsyncReadStreamProvider, S: $crate::traits::ProtocolState> ProtocolHandler<P, S> {
+            pub async fn async_read_packet<H>(
+                &mut self,
+            ) -> Result<H::Result, ReadError<<P::AsyncBaseReader<'_> as $crate::traits::asynchronous::AsyncReader>::Error>>
+            where
+                H: $crate::traits::asynchronous::AsyncProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
+            {
+                macro_rules! threshold {
+                    () => (self.provider.compression_threshold())
+                }
+
+                macro_rules! read_stream {
+                    () => (self.provider.async_read_stream())
+                }
+
+                macro_rules! with_bound {
+                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {
+                    {
+                        #[allow(unused)]
+                        use $crate::traits::asynchronous::{AsyncBoundableReader, AsyncBoundableDecompressableReader, AsyncWrappedReader};
+                        let mut $r_out = $r_in.with_bound($bound);
+                        let result = $bound_func;
+                        $r_in = $r_out.into_parent();
+                        result
+                    }};
+                }
+
+                macro_rules! with_decompression {
+                    ($r_in: ident => $r_out: ident $decomp_func:tt) => {{
+                        #[allow(unused)]
+                        use $crate::traits::asynchronous::{AsyncDecompressableReader, AsyncBoundableDecompressableReader, AsyncWrappedReader};
+                        let mut $r_out = $r_in.with_decompression();
+                        let result = $decomp_func;
+                        $r_in = $r_out.into_parent();
+                        result
+                    }};
+                }
+
+                macro_rules! handle_packet {
+                    ($designator:expr, $reader:ident) => (H::async_handle_packet($designator, &mut $reader).await)
+                }
+
+                macro_rules! read {
+                    ($type:ty, $reader:ident) => (<$type as $crate::traits::asynchronous::AsyncFromReader>::async_from_reader(&mut $reader).await?)
+                }
+
+                macro_rules! discard_remaining {
+                    ($reader:ident) => {{
+                        use $crate::traits::asynchronous::AsyncBoundedReader;
+                        let remaining = $reader.async_remaining().await;
+                        $reader.async_discard(remaining).await.map_err(ReadError::StreamError)?;
+                    }}
+                }
+
+                $($func)+
+            }
+        }
+    };
 }
 
-impl<P: ReadStreamProvider, S: ProtocolState> ProtocolHandler<P, S> {
-    pub fn read_packet<H>(
-        &mut self,
-    ) -> Result<H::Result, ReadError<<P::BaseReader<'_> as Reader>::Error>>
-    where
-        H: ProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
-    {
-        let compression_threshold = self.provider.compression_threshold();
-        let mut reader = self.provider.read_stream();
-        let packet_length: i32 = {
-            // 3-Byte VarInts are the maximum allowed for packet lengths
-            let mut reader = reader.with_bound(3);
-            VarInt::from_reader(&mut reader)?.into()
-        };
+read_packet_helper!({
+    let compression_threshold = threshold!();
+    let mut reader = read_stream!();
 
-        if packet_length < 0 {
-            return Err(ReadError::NegativeLength {
-                name: "packet_length",
-            });
-        }
+    // 3-Byte VarInts are the maximum allowed for packet lengths
+    let packet_length: i32 = with_bound!(3, reader => varint_reader {
+        read!(VarInt, varint_reader).into()
+    });
 
-        // SAFETY: We validated that `packet_length` >= 0.
-        let mut reader = reader.with_bound(packet_length as usize);
+    if packet_length < 0 {
+        return Err(ReadError::NegativeLength {
+            name: "packet_length",
+        });
+    }
 
-        macro_rules! handle_helper {
-            ($stream:expr) => {{
-                let packet_id: i32 = VarInt::from_reader(&mut $stream)?.into();
-                if let Some(designator) = S::designator_from_id(packet_id) {
-                    let result = H::handle_packet(designator, &mut $stream);
-                    $stream
-                        .discard($stream.remaining())
-                        .map_err(ReadError::StreamError)?;
-                    result
-                } else {
-                    Err(ReadError::UnknownPacket {
-                        state: S::STATE_NAME,
-                        id: packet_id,
-                    })
-                }
-            }};
-        }
+    macro_rules! handle_helper {
+        ($stream:ident) => {{
+            let packet_id: i32 = read!(VarInt, $stream).into();
+            if let Some(designator) = S::designator_from_id(packet_id) {
+                let result = handle_packet!(designator, $stream);
+                discard_remaining!($stream);
+                result
+            } else {
+                Err(ReadError::UnknownPacket {
+                    state: S::STATE_NAME,
+                    id: packet_id,
+                })
+            }
+        }};
+    }
 
+    // SAFETY: We validated that `packet_length` >= 0.
+    let result = with_bound!(packet_length as usize, reader => packet_reader {
         match compression_threshold {
             Some(_) => {
-                let data_length: i32 = VarInt::from_reader(&mut reader)?.into();
+                let data_length: i32 = read!(VarInt, packet_reader).into();
                 if data_length < 0 {
                     return Err(ReadError::NegativeLength {
                         name: "uncompressed_size",
@@ -162,100 +344,199 @@ impl<P: ReadStreamProvider, S: ProtocolState> ProtocolHandler<P, S> {
 
                 if data_length == 0 {
                     // Length of 0 means an uncompressed packet
-                    handle_helper!(reader)
+                    handle_helper!(packet_reader)
                 } else {
-                    let mut reader = reader.with_decompression();
-                    // SAFETY: We validated that `data_length` >= 0.
-                    let mut reader = reader.with_bound(data_length as usize);
-                    handle_helper!(reader)
+                    with_decompression!(packet_reader => d_r {
+                        // SAFETY: We validated that `data_length` >= 0.
+                        with_bound!(data_length as usize, d_r => decompression_reader {
+                            handle_helper!(decompression_reader)
+                        })
+                    })
                 }
             }
-            None => handle_helper!(reader),
+            None => handle_helper!(packet_reader),
         }
-    }
+    });
+    let _ = reader;
+    result
+});
+
+macro_rules! write_packet_internal_helper {
+    (($id:ident, $packet:ident: $packet_type:ident) {$($func:tt)+}) => {
+        impl<P: $crate::traits::WriteStreamProvider, S: $crate::traits::ProtocolState>
+            ProtocolHandler<P, S>
+        {
+            fn write_packet_internal<PACKET>(
+                &mut self,
+                id: i32,
+                packet: &$packet_type,
+            ) -> Result<(), WriteError<<P::BaseWriter<'_> as $crate::traits::Writer>::Error>>
+            where
+                $packet_type: $crate::traits::ToWriter,
+            {
+                macro_rules! threshold {
+                    () => (self.provider.compression_threshold())
+                }
+
+                macro_rules! level {
+                    () => (self.provider.compression_level())
+                }
+
+                macro_rules! writer {
+                    () => (self.provider.write_stream())
+                }
+
+                macro_rules! compression_writer {
+                    ($level:expr) => {
+                        <P::BaseWriter<'_> as CompressableWriter>::compression_writer(
+                            $level,
+                        )
+                    }
+                }
+
+                macro_rules! write {
+                    ($type:ty, $value:ident=> $writer:ident) => (<$type as $crate::traits::ToWriter>::to_writer(&$value, &mut $writer)?)
+                }
+
+                macro_rules! write_bytes {
+                    ($bytes:expr => $writer:ident) => ($writer.write($bytes).map_err(WriteError::StreamError)?)
+                }
+
+                macro_rules! flush {
+                    ($writer:ident) => ($writer.flush().map_err(WriteError::StreamError)?)
+                }
+
+                macro_rules! compressor_to_bytes {
+                    ($compressor:ident) => {
+                        $compressor
+                            .into_bytes()
+                            .map_err(WriteError::StreamError)?
+                    }
+                }
+
+                let $id = id;
+                let $packet = packet;
+                $($func)+
+            }
+        }
+
+        #[cfg(feature = "async")]
+        impl<P: $crate::traits::asynchronous::AsyncWriteStreamProvider, S: $crate::traits::ProtocolState>
+            ProtocolHandler<P, S>
+        {
+            async fn async_write_packet_internal<PACKET>(
+                &mut self,
+                id: i32,
+                packet: &$packet_type,
+            ) -> Result<(), WriteError<<P::AsyncBaseWriter<'_> as $crate::traits::asynchronous::AsyncWriter>::Error>>
+            where
+                $packet_type: $crate::traits::asynchronous::AsyncToWriter,
+            {
+                macro_rules! threshold {
+                    () => (self.provider.compression_threshold())
+                }
+
+                macro_rules! level {
+                    () => (self.provider.compression_level())
+                }
+
+                macro_rules! writer {
+                    () => (self.provider.async_write_stream())
+                }
+
+                macro_rules! compression_writer {
+                    ($level:expr) => {
+                        <P::AsyncBaseWriter<'_> as $crate::traits::asynchronous::AsyncCompressableWriter>::async_compression_writer(
+                            $level,
+                        )
+                    }
+                }
+
+                macro_rules! write {
+                    ($type:ty, $value:ident=> $writer:ident) => (<$type as $crate::traits::asynchronous::AsyncToWriter>::async_to_writer(&$value, &mut $writer).await?)
+                }
+
+                macro_rules! write_bytes {
+                    ($bytes:expr => $writer:ident) => {{
+                        use $crate::traits::asynchronous::AsyncWriter;
+                        $writer.async_write($bytes).await.map_err(WriteError::StreamError)?
+                    }}
+                }
+
+                macro_rules! flush {
+                    ($writer:ident) => {{
+                        use $crate::traits::asynchronous::AsyncWriter;
+                        $writer.async_flush().await.map_err(WriteError::StreamError)?
+                    }}
+                }
+
+                macro_rules! compressor_to_bytes {
+                    ($compressor:ident) => {{
+                        use $crate::traits::asynchronous::AsyncCompressionWriter;
+                        $compressor
+                            .async_into_bytes().await
+                            .map_err(WriteError::StreamError)?
+                    }}
+                }
+
+                let $id = id;
+                let $packet = packet;
+                $($func)+
+            }
+        }
+    };
 }
 
-impl<P: WriteStreamProvider, S: ProtocolState> ProtocolHandler<P, S> {
-    fn write_packet_internal<PACKET>(
-        &mut self,
-        id: i32,
-        packet: &PACKET,
-    ) -> Result<(), WriteError<<P::BaseWriter<'_> as Writer>::Error>>
-    where
-        PACKET: ToWriter,
-    {
-        let compression_threshold = self.provider.compression_threshold();
-        let compression_level = self.provider.compression_level();
-        let mut writer = self.provider.write_stream();
+write_packet_internal_helper!((id, packet: PACKET) {
+    let compression_threshold = threshold!();
+    let compression_level = level!();
+    let mut writer = writer!();
 
-        let id_varint = VarInt::from(id);
-        let id_size = id_varint.size();
-        let packet_size = packet.size();
-        let total_size = id_size + packet_size;
+    let id_varint = VarInt::from(id);
+    let id_size = id_varint.size();
+    let packet_size = packet.size();
+    let total_size = id_size + packet_size;
 
-        match compression_threshold {
-            Some(threshold) => {
-                if total_size < threshold {
-                    let total_size = total_size + 1;
-                    if total_size > MAX_PACKET_SIZE {
-                        return Err(WriteError::OverSized {
-                            name: "compression_below_size",
-                            maximum: MAX_PACKET_SIZE,
-                            was: total_size,
-                        });
-                    }
-
-                    // SAFETY: `MAX_PACKET_SIZE` is less than `i32::MAX`.
-                    let total_varint = VarInt::from(total_size as i32);
-                    total_varint.to_writer(&mut writer)?;
-                    // Uncompressed size of 0 denotes no compression.
-                    VarInt::from(0).to_writer(&mut writer)?;
-                    id_varint.to_writer(&mut writer)?;
-                    packet.to_writer(&mut writer)?;
-                } else {
-                    let mut compression_writer =
-                        <P::BaseWriter<'_> as CompressableWriter>::compression_writer(
-                            compression_level,
-                        );
-                    id_varint.to_writer(&mut compression_writer)?;
-                    packet.to_writer(&mut compression_writer)?;
-                    compression_writer
-                        .flush()
-                        .map_err(WriteError::StreamError)?;
-                    let compressed_data = compression_writer
-                        .into_bytes()
-                        .map_err(WriteError::StreamError)?;
-                    let compressed_slice = compressed_data.as_ref();
-
-                    let Ok(total_size): Result<i32, _> = total_size.try_into() else {
-                        return Err(WriteError::OverSized {
-                            name: "uncompressed_varint",
-                            maximum: i32::MAX as usize,
-                            was: total_size,
-                        });
-                    };
-
-                    let uncompressed_varint = VarInt::from(total_size);
-                    let total_size = uncompressed_varint.size() + compressed_slice.len();
-
-                    if total_size > MAX_PACKET_SIZE {
-                        return Err(WriteError::OverSized {
-                            name: "no_compression_size",
-                            maximum: MAX_PACKET_SIZE,
-                            was: total_size,
-                        });
-                    }
-
-                    // SAFETY: `MAX_PACKET_SIZE` is less than `i32::MAX`.
-                    let total_varint = VarInt::from(total_size as i32);
-                    total_varint.to_writer(&mut writer)?;
-                    uncompressed_varint.to_writer(&mut writer)?;
-                    writer
-                        .write(compressed_slice)
-                        .map_err(WriteError::StreamError)?;
+    match compression_threshold {
+        Some(threshold) => {
+            if total_size < threshold {
+                let total_size = total_size + 1;
+                if total_size > MAX_PACKET_SIZE {
+                    return Err(WriteError::OverSized {
+                        name: "compression_below_size",
+                        maximum: MAX_PACKET_SIZE,
+                        was: total_size,
+                    });
                 }
-            }
-            None => {
+
+                // SAFETY: `MAX_PACKET_SIZE` is less than `i32::MAX`.
+                let total_varint = VarInt::from(total_size as i32);
+                write!(VarInt, total_varint => writer);
+                // Uncompressed size of 0 denotes no compression.
+                let zero = VarInt::from(0);
+                write!(VarInt, zero => writer);
+                write!(VarInt, id_varint => writer);
+                write!(PACKET, packet => writer);
+            } else {
+                let mut compression_writer = compression_writer!(compression_level);
+                write!(VarInt, id_varint => compression_writer);
+                write!(PACKET, packet => compression_writer);
+                flush!(compression_writer);
+
+                let compressed_data = compressor_to_bytes!(compression_writer);
+                let compressed_slice = compressed_data.as_ref();
+
+                let Ok(total_size): Result<i32, _> = total_size.try_into() else {
+                    return Err(WriteError::OverSized {
+                        name: "uncompressed_varint",
+                        maximum: i32::MAX as usize,
+                        was: total_size,
+                    });
+                };
+
+                let uncompressed_varint = VarInt::from(total_size);
+                let total_size = uncompressed_varint.size() + compressed_slice.len();
+
                 if total_size > MAX_PACKET_SIZE {
                     return Err(WriteError::OverSized {
                         name: "no_compression_size",
@@ -266,82 +547,28 @@ impl<P: WriteStreamProvider, S: ProtocolState> ProtocolHandler<P, S> {
 
                 // SAFETY: `MAX_PACKET_SIZE` is less than `i32::MAX`.
                 let total_varint = VarInt::from(total_size as i32);
-                total_varint.to_writer(&mut writer)?;
-                id_varint.to_writer(&mut writer)?;
-                packet.to_writer(&mut writer)?;
+                write!(VarInt, total_varint => writer);
+                write!(VarInt, uncompressed_varint => writer);
+                write_bytes!(compressed_slice => writer);
             }
         }
-
-        writer.flush().map_err(WriteError::StreamError)?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "async")]
-mod asynchronous {
-    use crate::{
-        error::ReadError,
-        primatives::varint::VarInt,
-        protocol::{Handshake, MAX_PACKET_SIZE, ProtocolHandler},
-        traits::{
-            HandshakeProtocolState,
-            asynchronous::{
-                AsyncBoundableDecompressableReader, AsyncBoundedReader, AsyncFromReader,
-                AsyncProtocolStateHandler, AsyncReadStreamProvider, AsyncReader,
-                AsyncWrappedReader,
-            },
-        },
-    };
-
-    impl<P: AsyncReadStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
-        pub async fn async_read_handshake<H>(
-            &mut self,
-        ) -> Result<H::Result, ReadError<<P::AsyncBaseReader<'_> as AsyncReader>::Error>>
-        where
-            H: AsyncProtocolStateHandler<PacketDesignator = S::PacketDesignator>,
-        {
-            let mut reader = self.provider.async_read_stream().await;
-            let packet_length: i32 = {
-                // 3-Byte VarInts are the maximum allowed for packet lengths
-                let mut local_reader = reader.async_with_bound(3).await;
-                let result = VarInt::async_from_reader(&mut local_reader).await?.into();
-                reader = local_reader.into_parent();
-                result
-            };
-
-            if packet_length < 0 {
-                return Err(ReadError::NegativeLength {
-                    name: "packet_length",
+        None => {
+            if total_size > MAX_PACKET_SIZE {
+                return Err(WriteError::OverSized {
+                    name: "no_compression_size",
+                    maximum: MAX_PACKET_SIZE,
+                    was: total_size,
                 });
             }
 
-            if packet_length == 0xFE {
-                // VarInt interpretation of legacy ping handshake prefix
-
-                // Bound the stream to sane default (the 1.7+ maximum packet size)
-                let mut local_reader = reader.async_with_bound(MAX_PACKET_SIZE).await;
-                H::async_handle_packet(Handshake::Legacy, &mut local_reader).await
-                // TODO: Figure out a way to properly bound this so end-users don't need to worry about
-                // properly handling the packet, will eventually need to do this for legacy packets
-                // anyway
-            } else {
-                // SAFETY: We validated that `packet_length` >= 0.
-                let mut reader = reader.async_with_bound(packet_length as usize).await;
-                let packet_id: i32 = VarInt::async_from_reader(&mut reader).await?.into();
-                if let Some(designator) = S::designator_from_id(packet_id) {
-                    let result = H::async_handle_packet(designator, &mut reader).await?;
-                    reader
-                        .async_discard(reader.async_remaining().await)
-                        .await
-                        .map_err(ReadError::StreamError)?;
-                    Ok(result)
-                } else {
-                    Err(ReadError::UnknownPacket {
-                        state: S::STATE_NAME,
-                        id: packet_id,
-                    })
-                }
-            }
+            // SAFETY: `MAX_PACKET_SIZE` is less than `i32::MAX`.
+            let total_varint = VarInt::from(total_size as i32);
+            write!(VarInt, total_varint => writer);
+            write!(VarInt, id_varint => writer);
+            write!(PACKET, packet => writer);
         }
     }
-}
+
+    flush!(writer);
+    Ok(())
+});

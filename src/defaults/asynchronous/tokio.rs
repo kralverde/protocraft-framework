@@ -282,7 +282,7 @@ where
 {
     type AsyncBoundedReader = tokio::io::Take<R>;
 
-    async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
+    fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
         self.take(bound as u64)
     }
 }
@@ -293,7 +293,7 @@ where
 {
     type AsyncBoundedReader = tokio::io::Take<R>;
 
-    async fn async_with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
+    fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
         self.take(bound as u64)
     }
 }
@@ -330,7 +330,7 @@ where
 {
     type AsyncDecompressReader = ac::tokio::bufread::ZlibDecoder<R>;
 
-    async fn async_with_decompression(self) -> Self::AsyncDecompressReader {
+    fn with_decompression(self) -> Self::AsyncDecompressReader {
         ac::tokio::bufread::ZlibDecoder::new(self)
     }
 }
@@ -351,7 +351,7 @@ where
     type Level = ac::Level;
     type AsyncCompressionWriter = ac::tokio::write::ZlibEncoder<std::vec::Vec<u8>>;
 
-    async fn async_compression_writer(level: Self::Level) -> Self::AsyncCompressionWriter {
+    fn async_compression_writer(level: Self::Level) -> Self::AsyncCompressionWriter {
         ac::tokio::write::ZlibEncoder::with_quality(std::vec::Vec::new(), level)
     }
 }
@@ -398,7 +398,7 @@ impl<R: AsyncRead + Unpin, W> AsyncReadStreamProvider for AsyncDefaultStreamProv
     where
         Self: 'a;
 
-    async fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_> {
+    fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_> {
         &mut self.reader
     }
 }
@@ -409,7 +409,7 @@ impl<R, W: AsyncWrite + Unpin> AsyncWriteStreamProvider for AsyncDefaultStreamPr
     where
         Self: 'a;
 
-    async fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_> {
+    fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_> {
         &mut self.writer
     }
 }
