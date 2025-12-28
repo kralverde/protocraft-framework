@@ -7,5 +7,5 @@ pub mod protocol;
 pub mod traits;
 
 pub mod asynchronous;
-#[cfg(feature = "sync")]
-pub mod sync;
+#[cfg(feature = "std")]
+pub mod with_std;

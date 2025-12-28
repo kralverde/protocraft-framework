@@ -105,9 +105,16 @@ pub trait ProtocolStateHandler {
 pub trait StreamProvider {
     type CompressionLevel;
 
+    fn set_compression_threshold(&mut self, threshold: Option<usize>);
+
     fn compression_threshold(&self) -> Option<usize>;
 
     fn compression_level(&self) -> Self::CompressionLevel;
+}
+
+pub trait EncryptableStreamProvider: StreamProvider {
+    // TODO: Add warning about stale data in buffers here
+    fn with_encryption(&mut self, key: [u8; 16]);
 }
 
 pub trait ReadStreamProvider: StreamProvider {
@@ -229,10 +236,12 @@ pub mod asynchronous {
     }
 
     pub trait AsyncReadStreamProvider: StreamProvider {
+        type Error;
+
         // Reader type graph:
         // `Base Reader` -> `Bounded` -> `Decompress`(?) -> `Bounded`(?)
         // All readers need the same error type.
-        type AsyncBaseReader<'a>: AsyncBoundableDecompressableReader
+        type AsyncBaseReader<'a>: AsyncBoundableDecompressableReader<Error = Self::Error>
         where
             Self: 'a;
 
@@ -240,7 +249,12 @@ pub mod asynchronous {
     }
 
     pub trait AsyncWriteStreamProvider: StreamProvider {
-        type AsyncBaseWriter<'a>: AsyncCompressableWriter<Level = Self::CompressionLevel>
+        type Error;
+
+        type AsyncBaseWriter<'a>: AsyncCompressableWriter<
+            Level = Self::CompressionLevel,
+            Error = Self::Error,
+        >
         where
             Self: 'a;
 

@@ -18,7 +18,8 @@ build_protocol!(v1_21_10(773):
             0 => LoginStart
             1 => EncryptionResponse
             2 => PluginResponse
-            3 => CookieResponse
+            3 => LoginAcknowledge
+            4 => CookieResponse
     config:
         clientbound:
             0x00 => CookieRequest

@@ -17,6 +17,9 @@ pub enum ReadError<E> {
         name: &'static str,
         value: i32,
     },
+    StringDecode {
+        name: &'static str,
+    },
 }
 
 #[derive(Debug)]

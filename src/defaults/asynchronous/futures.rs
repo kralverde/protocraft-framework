@@ -8,13 +8,14 @@ use core::{
 use aes::cipher::{
     generic_array::GenericArray, inout::InOutBuf, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
-use tokio::io::{
-    AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
-    ReadBuf, Take,
+use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
+use futures_util::{
+    io::{BufReader, BufWriter, Take},
+    AsyncReadExt, AsyncWriteExt,
 };
 
 use crate::{
-    asynchronous::TokioIo,
+    asynchronous::FuturesIo,
     traits::{
         asynchronous::{
             AsyncBoundableDecompressableReader, AsyncBoundableReader, AsyncBoundedReader,
@@ -26,7 +27,7 @@ use crate::{
 };
 
 use async_compression::{
-    tokio::{bufread::ZlibDecoder, write::ZlibEncoder},
+    futures::{bufread::ZlibDecoder, write::ZlibEncoder},
     Level,
 };
 
@@ -42,18 +43,15 @@ where
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<tokio::io::Result<()>> {
+        buf: &mut [u8],
+    ) -> Poll<futures_io::Result<usize>> {
         let reader_ref = &mut self.as_mut().reader;
-        tokio::pin!(reader_ref);
+        let reader = std::pin::pin!(reader_ref);
+        let result = reader.poll_read(cx, buf);
 
-        let original_fill = buf.filled().len();
-        let result = reader_ref.poll_read(cx, buf);
-        if matches!(result, Poll::Ready(Ok(()))) {
-            let new_fill = buf.filled().len();
-
+        if let Poll::Ready(Ok(amount)) = &result {
             // We only want to decrypt what was just read
-            let io_buf: InOutBuf<u8> = (&mut buf.filled_mut()[original_fill..new_fill]).into();
+            let io_buf: InOutBuf<u8> = (&mut buf[..*amount]).into();
             let (chunks, tail) = io_buf.into_chunks();
             // SAFETY: Our chunk size is 1 byte. There will never be a tail.
             assert!(tail.is_empty());
@@ -84,12 +82,12 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, tokio::io::Error>> {
+    ) -> Poll<Result<usize, futures_io::Error>> {
         // Lots of small writes; we'll want to recommend using a `AsyncBufWriter`
         let mut total_written = 0;
 
         let (encryptor, writer, last_byte) = self.deconstruct();
-        tokio::pin!(writer);
+        let mut writer = std::pin::pin!(writer);
 
         if let Some(byte) = last_byte {
             let result = writer.as_mut().poll_write(cx, &[*byte]);
@@ -127,19 +125,19 @@ where
     fn poll_flush(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), tokio::io::Error>> {
+    ) -> Poll<Result<(), futures_io::Error>> {
         let writer = &mut self.as_mut().writer;
-        tokio::pin!(writer);
+        let writer = std::pin::pin!(writer);
         writer.poll_flush(cx)
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), tokio::io::Error>> {
+    ) -> Poll<Result<(), futures_io::Error>> {
         let writer = &mut self.as_mut().writer;
-        tokio::pin!(writer);
-        writer.poll_shutdown(cx)
+        let writer = std::pin::pin!(writer);
+        writer.poll_close(cx)
     }
 }
 
@@ -172,15 +170,15 @@ where
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<tokio::io::Result<()>> {
+        buf: &mut [u8],
+    ) -> Poll<futures_io::Result<usize>> {
         match &mut *self {
             Self::Standard(reader) => {
-                tokio::pin!(reader);
+                let reader = std::pin::pin!(reader);
                 reader.poll_read(cx, buf)
             }
             Self::Decrypt(reader) => {
-                tokio::pin!(reader);
+                let reader = std::pin::pin!(reader);
                 reader.poll_read(cx, buf)
             }
             Self::Poisoned => unreachable!(),
@@ -219,14 +217,14 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, tokio::io::Error>> {
+    ) -> Poll<Result<usize, futures_io::Error>> {
         match &mut *self {
             Self::Standard(writer) => {
-                tokio::pin!(writer);
+                let writer = std::pin::pin!(writer);
                 writer.poll_write(cx, buf)
             }
             Self::Encrypt(writer) => {
-                tokio::pin!(writer);
+                let writer = std::pin::pin!(writer);
                 writer.poll_write(cx, buf)
             }
             Self::Poisoned => {
@@ -238,14 +236,14 @@ where
     fn poll_flush(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), tokio::io::Error>> {
+    ) -> Poll<Result<(), futures_io::Error>> {
         match &mut *self {
             Self::Standard(writer) => {
-                tokio::pin!(writer);
+                let writer = std::pin::pin!(writer);
                 writer.poll_flush(cx)
             }
             Self::Encrypt(writer) => {
-                tokio::pin!(writer);
+                let writer = std::pin::pin!(writer);
                 writer.poll_flush(cx)
             }
             Self::Poisoned => {
@@ -254,18 +252,18 @@ where
         }
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), tokio::io::Error>> {
+    ) -> Poll<Result<(), futures_io::Error>> {
         match &mut *self {
             Self::Standard(writer) => {
-                tokio::pin!(writer);
-                writer.poll_shutdown(cx)
+                let writer = std::pin::pin!(writer);
+                writer.poll_close(cx)
             }
             Self::Encrypt(writer) => {
-                tokio::pin!(writer);
-                writer.poll_shutdown(cx)
+                let writer = std::pin::pin!(writer);
+                writer.poll_close(cx)
             }
             Self::Poisoned => {
                 unreachable!()
@@ -274,38 +272,38 @@ where
     }
 }
 
-impl<R> AsyncWrappedReader<TokioIo<R>> for TokioIo<Take<R>>
+impl<R> AsyncWrappedReader<FuturesIo<R>> for FuturesIo<Take<R>>
 where
     R: AsyncRead + Unpin,
 {
-    fn into_parent(self) -> TokioIo<R> {
-        TokioIo(self.0.into_inner())
+    fn into_parent(self) -> FuturesIo<R> {
+        FuturesIo(self.0.into_inner())
     }
 }
 
-impl<R> AsyncBoundableDecompressableReader for TokioIo<R>
+impl<R> AsyncBoundableDecompressableReader for FuturesIo<R>
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncBoundedReader = TokioIo<Take<R>>;
+    type AsyncBoundedReader = FuturesIo<Take<R>>;
 
     fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
-        TokioIo(self.0.take(bound as u64))
+        FuturesIo(self.0.take(bound as u64))
     }
 }
 
-impl<R> AsyncBoundableReader for TokioIo<R>
+impl<R> AsyncBoundableReader for FuturesIo<R>
 where
     R: AsyncRead + Unpin,
 {
-    type AsyncBoundedReader = TokioIo<Take<R>>;
+    type AsyncBoundedReader = FuturesIo<Take<R>>;
 
     fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
-        TokioIo(self.0.take(bound as u64))
+        FuturesIo(self.0.take(bound as u64))
     }
 }
 
-impl<R> AsyncBoundedReader for TokioIo<Take<R>>
+impl<R> AsyncBoundedReader for FuturesIo<Take<R>>
 where
     R: AsyncRead + Unpin,
 {
@@ -316,33 +314,33 @@ where
     async fn async_discard(&mut self, amount: usize) -> Result<(), Self::Error> {
         if amount != 0 {
             let mut reader = (&mut self.0).take(amount as u64);
-            let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await?;
+            let _ = futures_util::io::copy(&mut reader, &mut futures_util::io::sink()).await?;
         }
         Ok(())
     }
 }
 
-impl<R> AsyncWrappedReader<TokioIo<R>> for TokioIo<ZlibDecoder<R>>
+impl<R> AsyncWrappedReader<FuturesIo<R>> for FuturesIo<ZlibDecoder<R>>
 where
     R: AsyncBufRead + Unpin,
 {
-    fn into_parent(self) -> TokioIo<R> {
-        TokioIo(self.0.into_inner())
+    fn into_parent(self) -> FuturesIo<R> {
+        FuturesIo(self.0.into_inner())
     }
 }
 
-impl<R> AsyncDecompressableReader for TokioIo<R>
+impl<R> AsyncDecompressableReader for FuturesIo<R>
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncDecompressReader = TokioIo<ZlibDecoder<R>>;
+    type AsyncDecompressReader = FuturesIo<ZlibDecoder<R>>;
 
     fn with_decompression(self) -> Self::AsyncDecompressReader {
-        TokioIo(ZlibDecoder::new(self.0))
+        FuturesIo(ZlibDecoder::new(self.0))
     }
 }
 
-impl AsyncCompressionWriter for TokioIo<ZlibEncoder<std::vec::Vec<u8>>> {
+impl AsyncCompressionWriter for FuturesIo<ZlibEncoder<std::vec::Vec<u8>>> {
     type Bytes = std::vec::Vec<u8>;
 
     async fn async_into_bytes(mut self) -> Result<Self::Bytes, Self::Error> {
@@ -351,15 +349,15 @@ impl AsyncCompressionWriter for TokioIo<ZlibEncoder<std::vec::Vec<u8>>> {
     }
 }
 
-impl<W> AsyncCompressableWriter for TokioIo<W>
+impl<W> AsyncCompressableWriter for FuturesIo<W>
 where
     W: AsyncWrite + Unpin,
 {
     type Level = Level;
-    type AsyncCompressionWriter = TokioIo<ZlibEncoder<std::vec::Vec<u8>>>;
+    type AsyncCompressionWriter = FuturesIo<ZlibEncoder<std::vec::Vec<u8>>>;
 
     fn async_compression_writer(level: Self::Level) -> Self::AsyncCompressionWriter {
-        TokioIo(ZlibEncoder::with_quality(std::vec::Vec::new(), level))
+        FuturesIo(ZlibEncoder::with_quality(std::vec::Vec::new(), level))
     }
 }
 
@@ -397,7 +395,7 @@ impl<R, W> StreamProvider for AsyncDefaultStreamProvider<R, W> {
     }
 }
 
-impl<R: AsyncRead + Unpin, W> EncryptableStreamProvider for AsyncDefaultStreamProvider<R, W> {
+impl<R, W> EncryptableStreamProvider for AsyncDefaultStreamProvider<R, W> {
     fn with_encryption(&mut self, key: [u8; 16]) {
         self.reader.get_mut().with_encryption(&key);
         self.writer.with_encryption(&key);
@@ -405,27 +403,27 @@ impl<R: AsyncRead + Unpin, W> EncryptableStreamProvider for AsyncDefaultStreamPr
 }
 
 impl<R: AsyncRead + Unpin, W> AsyncReadStreamProvider for AsyncDefaultStreamProvider<R, W> {
-    type Error = tokio::io::Error;
+    type Error = futures_io::Error;
 
     type AsyncBaseReader<'a>
-        = TokioIo<&'a mut BufReader<AsyncDefaultReader<R>>>
+        = FuturesIo<&'a mut BufReader<AsyncDefaultReader<R>>>
     where
         Self: 'a;
 
     fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_> {
-        TokioIo(&mut self.reader)
+        FuturesIo(&mut self.reader)
     }
 }
 
 impl<R, W: AsyncWrite + Unpin> AsyncWriteStreamProvider for AsyncDefaultStreamProvider<R, W> {
-    type Error = tokio::io::Error;
+    type Error = futures_io::Error;
 
     type AsyncBaseWriter<'a>
-        = TokioIo<&'a mut AsyncDefaultWriter<BufWriter<W>>>
+        = FuturesIo<&'a mut AsyncDefaultWriter<BufWriter<W>>>
     where
         Self: 'a;
 
     fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_> {
-        TokioIo(&mut self.writer)
+        FuturesIo(&mut self.writer)
     }
 }

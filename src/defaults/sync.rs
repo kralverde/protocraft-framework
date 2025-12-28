@@ -1,7 +1,7 @@
 extern crate std;
 
 use aes::cipher::{
-    BlockDecryptMut, BlockEncryptMut, KeyIvInit, generic_array::GenericArray, inout::InOutBuf,
+    generic_array::GenericArray, inout::InOutBuf, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
 
 use crate::traits::{
@@ -263,6 +263,10 @@ impl<R: std::io::Read, W: std::io::Write> DefaultStreamProvider<R, W> {
 
 impl<R, W: std::io::Write> StreamProvider for DefaultStreamProvider<R, W> {
     type CompressionLevel = flate2::Compression;
+
+    fn set_compression_threshold(&mut self, threshold: Option<usize>) {
+        self.compression_threshold = threshold;
+    }
 
     fn compression_threshold(&self) -> Option<usize> {
         self.compression_threshold

@@ -2,8 +2,8 @@ pub mod varint;
 
 #[macro_export]
 macro_rules! from_reader_helper {
-    ($type:ty {$($func:tt)+}) => {
-        impl $crate::traits::FromReader for $type {
+    ($type:ident$(<$($generic:ident$(:$bound:path)?),+>)? {$($func:tt)+}) => {
+        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::FromReader for $type$(<$($generic),+>)? {
             fn from_reader<R>(reader: &mut R) -> Result<Self, $crate::error::ReadError<R::Error>>
             where
                 R: $crate::traits::BoundedReader,
@@ -29,7 +29,7 @@ macro_rules! from_reader_helper {
         }
 
         #[cfg(feature = "async")]
-        impl $crate::traits::asynchronous::AsyncFromReader for $type {
+        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::asynchronous::AsyncFromReader for $type$(<$($generic),+>)? {
             async fn async_from_reader<R>(
                 reader: &mut R,
             ) -> Result<Self, $crate::error::ReadError<R::Error>>
@@ -60,8 +60,8 @@ macro_rules! from_reader_helper {
 
 #[macro_export]
 macro_rules! to_writer_helper {
-    ($type:ty, $this:ident {$($func:tt)+}) => {
-        impl $crate::traits::ToWriter for $type {
+    ($type:ident$(<$($generic:ident$(:$bound:path)?),+>)?, $this:ident {$($func:tt)+}) => {
+        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::ToWriter for $type$(<$($generic),+>)? {
             fn to_writer<W>(
                 &self,
                 writer: &mut W,
@@ -78,13 +78,18 @@ macro_rules! to_writer_helper {
                     }
                 }
 
+                #[allow(unused_macros)]
+                macro_rules! write {
+                    ($write_type:ty, $value:expr) => (<$write_type as $crate::traits::ToWriter>::to_writer($value, writer)?)
+                }
+
                 let $this = self;
                 $($func)+
             }
         }
 
         #[cfg(feature = "async")]
-        impl $crate::traits::asynchronous::AsyncToWriter for $type {
+        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::asynchronous::AsyncToWriter for $type$(<$($generic),+>)? {
             async fn async_to_writer<W>(
                 &self,
                 writer: &mut W,
@@ -101,6 +106,11 @@ macro_rules! to_writer_helper {
                     }
                 }
 
+                #[allow(unused_macros)]
+                macro_rules! write {
+                    ($write_type:ty, $value:expr) => (<$write_type as $crate::traits::asynchronous::AsyncToWriter>::async_to_writer($value, writer).await?)
+                }
+
                 let $this = self;
                 $($func)+
             }
@@ -109,7 +119,7 @@ macro_rules! to_writer_helper {
 }
 
 macro_rules! build_primative {
-    ($type:ty, $bytes:literal) => {
+    ($type:ident, $bytes:literal) => {
         $crate::from_reader_helper!($type {
             let mut buf = [0u8; $bytes];
             read_bytes!(&mut buf);

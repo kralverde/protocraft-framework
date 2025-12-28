@@ -1,0 +1,12 @@
+[package]
+name = "example_helpers"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+protocraft_framework = { path = "..", features = ["async", "v1_21_10"] }
+rsa = "0.9.9"
+rand = "0.8.5"
+pkcs8 = "0.10.2"
+uuid = "1.19.0"
+crab_nbt = "0.2.11"

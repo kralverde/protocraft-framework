@@ -2,6 +2,7 @@
 macro_rules! _build_protocol_state {
     ($state:ident, $state_designator:ident, $state_name:literal, $($id:literal => $packet_name:ident)+) => {
         pub enum $state {}
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum $state_designator {
         $(
             $packet_name
@@ -193,5 +194,8 @@ macro_rules! build_protocol {
 }
 
 // See https://minecraft.wiki/w/Minecraft_Wiki:Projects/wiki.vg_merge/Protocol_version_numbers
+
+#[cfg(feature = "v1_21_10")]
 mod v773;
+#[cfg(feature = "v1_21_10")]
 pub use v773::v1_21_10;

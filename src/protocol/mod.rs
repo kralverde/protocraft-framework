@@ -3,16 +3,80 @@ use core::marker::PhantomData;
 use crate::{
     error::{ReadError, WriteError},
     primatives::varint::VarInt,
+    to_writer_helper,
     traits::{
         BoundableDecompressableReader, BoundableReader, BoundedReader, CompressableWriter,
         CompressionWriter, DecompressableReader, HandshakeProtocolState, HasNextProtocolState,
-        Serializable, Writer,
+        Serializable, ToWriter, WriteStreamProvider, Writer,
     },
 };
 
 pub mod versions;
 
 pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
+
+pub struct LegacyPingResponse<S: AsRef<str>> {
+    server_version: S,
+    motd: S,
+    player_count: S,
+    max_players: S,
+    payload_length: usize,
+}
+
+fn utf16_code_units<S: AsRef<str>>(string: S) -> usize {
+    let string = string.as_ref();
+    string.encode_utf16().count()
+}
+
+impl<S: AsRef<str>> LegacyPingResponse<S> {
+    pub fn new(server_version: S, motd: S, player_count: S, max_players: S) -> Option<Self> {
+        let payload_length = 11
+            + (utf16_code_units(&server_version)
+                + utf16_code_units(&motd)
+                + utf16_code_units(&player_count)
+                + utf16_code_units(&max_players));
+
+        if payload_length > i16::MAX as usize {
+            None
+        } else {
+            Some(Self {
+                server_version,
+                motd,
+                player_count,
+                max_players,
+                payload_length,
+            })
+        }
+    }
+}
+
+impl<S: AsRef<str>> Serializable for LegacyPingResponse<S> {
+    fn size(&self) -> usize {
+        3 + self.payload_length * 2
+    }
+}
+
+macro_rules! write_legacy_string {
+    ($string:expr) => {
+        for codeunit in $string.encode_utf16() {
+            write!(u16, &codeunit);
+        }
+        write!(u16, &0);
+    };
+}
+
+to_writer_helper!(LegacyPingResponse<S: AsRef<str>>, this {
+    write!(u8, &0xFF);
+    // SAFETY: This is validated in the constructor
+    write!(i16, &(this.payload_length as i16));
+    write_legacy_string!("§1");
+    write_legacy_string!("127");
+    write_legacy_string!(this.server_version.as_ref());
+    write_legacy_string!(this.motd.as_ref());
+    write_legacy_string!(this.player_count.as_ref());
+    write_legacy_string!(this.max_players.as_ref());
+    Ok(())
+});
 
 pub enum Handshake {
     Standard,
@@ -56,6 +120,39 @@ impl<P, S: HasNextProtocolState> ProtocolHandler<P, S> {
             provider: self.provider,
             _x: PhantomData {},
         }
+    }
+}
+
+impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
+    pub fn write_legacy_ping_response<String>(
+        &mut self,
+        response: &LegacyPingResponse<String>,
+    ) -> Result<(), WriteError<<P::BaseWriter<'_> as Writer>::Error>>
+    where
+        String: AsRef<str>,
+    {
+        let mut writer = self.provider.write_stream();
+        response.to_writer(&mut writer)
+    }
+}
+
+#[cfg(feature = "async")]
+impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProtocolState>
+    ProtocolHandler<P, S>
+{
+    pub async fn async_write_legacy_ping_response<String>(
+        &mut self,
+        response: &LegacyPingResponse<String>,
+    ) -> Result<
+        (),
+        WriteError<<P::AsyncBaseWriter<'_> as crate::traits::asynchronous::AsyncWriter>::Error>,
+    >
+    where
+        String: AsRef<str>,
+    {
+        use crate::traits::asynchronous::AsyncToWriter;
+        let mut writer = self.provider.async_write_stream();
+        response.async_to_writer(&mut writer).await
     }
 }
 
@@ -366,6 +463,7 @@ macro_rules! write_packet_internal_helper {
         impl<P: $crate::traits::WriteStreamProvider, S: $crate::traits::ProtocolState>
             ProtocolHandler<P, S>
         {
+            #[allow(unused)]
             fn write_packet_internal<PACKET>(
                 &mut self,
                 id: i32,
@@ -424,6 +522,7 @@ macro_rules! write_packet_internal_helper {
         impl<P: $crate::traits::asynchronous::AsyncWriteStreamProvider, S: $crate::traits::ProtocolState>
             ProtocolHandler<P, S>
         {
+            #[allow(unused)]
             async fn async_write_packet_internal<PACKET>(
                 &mut self,
                 id: i32,
