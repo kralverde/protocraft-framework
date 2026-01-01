@@ -1,14 +1,17 @@
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 
+use example_helpers::async_handle_connection_with_errors;
 use futures::executor;
 use futures_net::TcpStream;
 use protocraft_framework::defaults::asynchronous::futures::AsyncDefaultStreamProvider;
 
-async fn handle_connection(read_stream: TcpStream, write_stream: TcpStream) {
+async fn handle_connection(read_stream: TcpStream, write_stream: TcpStream, socket: SocketAddr) {
+    println!("Accepted connection: {}", socket);
     let provider = AsyncDefaultStreamProvider::new(read_stream, write_stream);
-    if let Err(err) = example_helpers::handle_connection_with_errors(provider).await {
+    if let Err(err) = async_handle_connection_with_errors(provider).await {
         println!("Error: {:?}", err);
     }
+    println!("Closed connection: {}", socket);
 }
 
 fn main() {
@@ -17,11 +20,11 @@ fn main() {
 
     loop {
         let (stream, socket) = listener.accept().expect("Failed to accept connection");
-        println!("Accepted connection: {}", socket);
         let other_stream = stream.try_clone().expect("Failed to clone the stream.");
         executor::block_on(handle_connection(
             stream.try_into().unwrap(),
             other_stream.try_into().unwrap(),
+            socket,
         ))
     }
 }

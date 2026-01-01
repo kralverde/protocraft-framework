@@ -1,3 +1,4 @@
+pub mod handshake_version;
 pub mod varint;
 
 #[macro_export]
@@ -6,15 +7,15 @@ macro_rules! from_reader_helper {
         impl$(<$($generic$(:$bound)?),+>)? $crate::traits::FromReader for $type$(<$($generic),+>)? {
             fn from_reader<R>(reader: &mut R) -> Result<Self, $crate::error::ReadError<R::Error>>
             where
-                R: $crate::traits::BoundedReader,
+                R: $crate::traits::Reader,
             {
                 #[allow(unused_macros)]
                 macro_rules! read_bytes {
-                    ($buf:expr) => {
-                        reader
-                            .read_exact($buf)
-                            .map_err($crate::error::ReadError::StreamError)?;
-                    }
+                    ($count:literal) => {{
+                        let mut buf = [0u8; $count];
+                        reader.read_exact(&mut buf).map_err($crate::error::ReadError::StreamError)?;
+                        buf
+                    }}
                 }
 
                 #[allow(unused_macros)]
@@ -22,6 +23,11 @@ macro_rules! from_reader_helper {
                     ($read_ty:ty) => {
                         <$read_ty as $crate::traits::FromReader>::from_reader(reader)?
                     }
+                }
+
+                #[allow(unused_macros)]
+                macro_rules! try_read_byte {
+                    () => (reader.try_read_byte().map_err($crate::error::ReadError::StreamError)?)
                 }
 
                 $($func)+
@@ -34,15 +40,15 @@ macro_rules! from_reader_helper {
                 reader: &mut R,
             ) -> Result<Self, $crate::error::ReadError<R::Error>>
             where
-                R: $crate::traits::asynchronous::AsyncBoundedReader,
+                R: $crate::traits::asynchronous::AsyncReader,
             {
                 #[allow(unused_macros)]
                 macro_rules! read_bytes {
-                    ($buf:expr) => {
-                        reader
-                            .async_read_exact($buf).await
-                            .map_err($crate::error::ReadError::StreamError)?;
-                    }
+                    ($count:literal) => {{
+                        let mut buf = [0u8; $count];
+                        reader.async_read_exact(&mut buf).await.map_err($crate::error::ReadError::StreamError)?;
+                        buf
+                    }}
                 }
 
                 #[allow(unused_macros)]
@@ -50,6 +56,11 @@ macro_rules! from_reader_helper {
                     ($read_ty:ty) => {
                         <$read_ty as $crate::traits::asynchronous::AsyncFromReader>::async_from_reader(reader).await?
                     }
+                }
+
+                #[allow(unused_macros)]
+                macro_rules! try_read_byte {
+                    () => (reader.async_try_read_byte().await.map_err($crate::error::ReadError::StreamError)?)
                 }
 
                 $($func)+
@@ -121,8 +132,7 @@ macro_rules! to_writer_helper {
 macro_rules! build_primative {
     ($type:ident, $bytes:literal) => {
         $crate::from_reader_helper!($type {
-            let mut buf = [0u8; $bytes];
-            read_bytes!(&mut buf);
+            let buf = read_bytes!($bytes);
             let result = <$type>::from_be_bytes(buf);
             Ok(result)
         });

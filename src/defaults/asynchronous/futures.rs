@@ -20,7 +20,8 @@ use crate::{
         asynchronous::{
             AsyncBoundableDecompressableReader, AsyncBoundableReader, AsyncBoundedReader,
             AsyncCompressableWriter, AsyncCompressionWriter, AsyncDecompressableReader,
-            AsyncReadStreamProvider, AsyncWrappedReader, AsyncWriteStreamProvider,
+            AsyncPreCompressionWriter, AsyncReadStreamProvider, AsyncWriteStreamProvider,
+            AsyncWriter,
         },
         EncryptableStreamProvider, StreamProvider,
     },
@@ -272,12 +273,12 @@ where
     }
 }
 
-impl<R> AsyncWrappedReader<FuturesIo<R>> for FuturesIo<Take<R>>
+impl<R> From<FuturesIo<Take<R>>> for FuturesIo<R>
 where
     R: AsyncRead + Unpin,
 {
-    fn into_parent(self) -> FuturesIo<R> {
-        FuturesIo(self.0.into_inner())
+    fn from(value: FuturesIo<Take<R>>) -> Self {
+        FuturesIo(value.0.into_inner())
     }
 }
 
@@ -310,22 +311,14 @@ where
     async fn async_remaining(&self) -> usize {
         self.0.limit() as usize
     }
-
-    async fn async_discard(&mut self, amount: usize) -> Result<(), Self::Error> {
-        if amount != 0 {
-            let mut reader = (&mut self.0).take(amount as u64);
-            let _ = futures_util::io::copy(&mut reader, &mut futures_util::io::sink()).await?;
-        }
-        Ok(())
-    }
 }
 
-impl<R> AsyncWrappedReader<FuturesIo<R>> for FuturesIo<ZlibDecoder<R>>
+impl<R> From<FuturesIo<ZlibDecoder<R>>> for FuturesIo<R>
 where
     R: AsyncBufRead + Unpin,
 {
-    fn into_parent(self) -> FuturesIo<R> {
-        FuturesIo(self.0.into_inner())
+    fn from(value: FuturesIo<ZlibDecoder<R>>) -> Self {
+        FuturesIo(value.0.into_inner())
     }
 }
 
@@ -340,12 +333,66 @@ where
     }
 }
 
-impl AsyncCompressionWriter for FuturesIo<ZlibEncoder<std::vec::Vec<u8>>> {
-    type Bytes = std::vec::Vec<u8>;
+pub struct CachedPreCompressionWriter(ZlibEncoder<std::vec::Vec<u8>>);
 
-    async fn async_into_bytes(mut self) -> Result<Self::Bytes, Self::Error> {
+impl AsyncWriter for CachedPreCompressionWriter {
+    type Error = futures_io::Error;
+
+    async fn async_write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        self.0.write_all(data).await?;
+        Ok(())
+    }
+
+    async fn async_flush(&mut self) -> Result<(), Self::Error> {
+        // Handled in `Self::async_finish`
+        Ok(())
+    }
+}
+
+impl AsyncPreCompressionWriter for CachedPreCompressionWriter {
+    type Payload = std::vec::Vec<u8>;
+
+    async fn async_finish(mut self) -> Result<(usize, Self::Payload), Self::Error> {
         self.0.flush().await?;
-        Ok(self.0.into_inner())
+        let buffer = self.0.into_inner();
+        Ok((buffer.len(), buffer))
+    }
+}
+
+pub struct CachedCompressionWriter<W>(W);
+
+impl<W> AsyncWriter for CachedCompressionWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    type Error = futures_io::Error;
+
+    async fn async_write(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+        // Handled in `Self::initialize`
+        Ok(())
+    }
+
+    async fn async_flush(&mut self) -> Result<(), Self::Error> {
+        self.0.flush().await?;
+        Ok(())
+    }
+}
+
+impl<W> AsyncCompressionWriter for CachedCompressionWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    type Payload = std::vec::Vec<u8>;
+
+    async fn async_initialize(&mut self, payload: Self::Payload) -> Result<(), Self::Error> {
+        self.0.write_all(&payload).await?;
+        Ok(())
+    }
+}
+
+impl<W> From<CachedCompressionWriter<W>> for FuturesIo<W> {
+    fn from(value: CachedCompressionWriter<W>) -> Self {
+        FuturesIo(value.0)
     }
 }
 
@@ -353,11 +400,18 @@ impl<W> AsyncCompressableWriter for FuturesIo<W>
 where
     W: AsyncWrite + Unpin,
 {
+    type Payload = std::vec::Vec<u8>;
     type Level = Level;
-    type AsyncCompressionWriter = FuturesIo<ZlibEncoder<std::vec::Vec<u8>>>;
 
-    fn async_compression_writer(level: Self::Level) -> Self::AsyncCompressionWriter {
-        FuturesIo(ZlibEncoder::with_quality(std::vec::Vec::new(), level))
+    type AsyncPreCompressionWriter = CachedPreCompressionWriter;
+    type AsyncCompressionWriter = CachedCompressionWriter<W>;
+
+    fn async_pre_compression_writer(level: &Self::Level) -> Self::AsyncPreCompressionWriter {
+        CachedPreCompressionWriter(ZlibEncoder::with_quality(std::vec::Vec::new(), *level))
+    }
+
+    fn with_async_compression(self, _level: &Self::Level) -> Self::AsyncCompressionWriter {
+        CachedCompressionWriter(self.0)
     }
 }
 

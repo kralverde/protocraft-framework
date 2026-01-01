@@ -1,8 +1,8 @@
 [package]
 name = "protocraft_framework"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.81"
+edition = "2024"
+rust-version = "1.85"
 description = "A framework for handling minecraft packets"
 # TODO: Readme, repository
 license = "MIT OR Apache-2.0"
@@ -64,8 +64,8 @@ required-features = ["defaults"]
 
 [[example]]
 name = "server_status_tokio_async"
-required-features = ["tokio-defaults"]
+required-features = ["tokio-defaults", "example_helpers/async"]
 
 [[example]]
 name = "server_status_futures_async"
-required-features = ["futures-defaults"]
+required-features = ["futures-defaults", "example_helpers/async"]

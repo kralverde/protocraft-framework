@@ -20,6 +20,7 @@ pub enum ReadError<E> {
     StringDecode {
         name: &'static str,
     },
+    MalformedLegacyPing,
 }
 
 #[derive(Debug)]

@@ -19,8 +19,8 @@ impl Into<i32> for VarInt {
     }
 }
 
-const SEGMENT_MASK: u32 = 0x7f;
-const CONTINUE_MASK_U32: u32 = 0x80;
+pub(crate) const SEGMENT_MASK: u32 = 0x7f;
+pub(crate) const CONTINUE_MASK_U32: u32 = 0x80;
 const CONTINUE_MASK_U8: u8 = 0x80;
 
 from_reader_helper!(VarInt {

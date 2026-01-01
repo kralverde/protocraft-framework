@@ -1,3 +1,4 @@
+#[doc(hidden)]
 #[macro_export]
 macro_rules! _build_protocol_state {
     ($state:ident, $state_designator:ident, $state_name:literal, $($id:literal => $packet_name:ident)+) => {
@@ -33,6 +34,7 @@ macro_rules! _build_protocol_state {
     }
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! _build_protocol_writer {
     ($state:ident, $reciprocal:ident) => {
@@ -46,7 +48,7 @@ macro_rules! _build_protocol_writer {
                 $crate::error::WriteError<<P::BaseWriter<'_> as $crate::traits::Writer>::Error>,
             >
             where
-                PACKET: $crate::traits::ToWriter,
+                PACKET: $crate::traits::ToWriter + $crate::traits::Serializable,
             {
                 self.write_packet_internal(packet.id(), payload)
             }
@@ -67,7 +69,7 @@ macro_rules! _build_protocol_writer {
                 >,
             >
             where
-                PACKET: $crate::traits::asynchronous::AsyncToWriter,
+                PACKET: $crate::traits::asynchronous::AsyncToWriter + $crate::traits::Serializable,
             {
                 self.async_write_packet_internal(packet.id(), payload).await
             }

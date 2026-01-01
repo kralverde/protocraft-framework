@@ -6,8 +6,8 @@ use aes::cipher::{
 
 use crate::traits::{
     BoundableDecompressableReader, BoundableReader, BoundedReader, CompressableWriter,
-    CompressionWriter, DecompressableReader, ReadStreamProvider, StreamProvider,
-    WriteStreamProvider,
+    CompressionWriter, DecompressableReader, EncryptableStreamProvider, PreCompressionWriter,
+    ReadStreamProvider, SetBlocking, StreamProvider, WriteStreamProvider, Writer,
 };
 
 pub struct DecryptionReader<R> {
@@ -84,6 +84,19 @@ pub enum DefaultReader<R> {
     Poisoned,
 }
 
+impl<R> SetBlocking for DefaultReader<R>
+where
+    R: SetBlocking,
+{
+    fn set_blocking(&mut self, blocking: bool) {
+        match self {
+            Self::Standard(reader) => reader.set_blocking(blocking),
+            Self::Decrypt(reader) => reader.reader.set_blocking(blocking),
+            Self::Poisoned => unreachable!(),
+        }
+    }
+}
+
 impl<R> DefaultReader<R> {
     fn with_encryption(&mut self, key: &[u8; 16]) {
         match std::mem::replace(self, Self::Poisoned) {
@@ -143,7 +156,9 @@ where
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Standard(writer) => writer.write(buf),
-            Self::Encrypt(writer) => writer.write(buf),
+            Self::Encrypt(writer) => {
+                <std::boxed::Box<EncryptionWriter<W>> as std::io::Write>::write(writer, buf)
+            }
             Self::Poisoned => unreachable!(),
         }
     }
@@ -151,15 +166,26 @@ where
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Standard(writer) => writer.flush(),
-            Self::Encrypt(writer) => writer.flush(),
+            Self::Encrypt(writer) => {
+                <std::boxed::Box<EncryptionWriter<W>> as std::io::Write>::flush(writer)
+            }
             Self::Poisoned => unreachable!(),
         }
     }
 }
 
+impl<R> SetBlocking for std::io::Take<R>
+where
+    R: std::io::Read + SetBlocking,
+{
+    fn set_blocking(&mut self, blocking: bool) {
+        self.get_mut().set_blocking(blocking);
+    }
+}
+
 impl<R> BoundableDecompressableReader for R
 where
-    R: std::io::BufRead,
+    R: std::io::BufRead + SetBlocking,
 {
     type BoundedReader<'a>
         = std::io::Take<&'a mut R>
@@ -173,7 +199,7 @@ where
 
 impl<R> BoundableReader for R
 where
-    R: std::io::Read,
+    R: std::io::Read + SetBlocking,
 {
     type BoundedReader<'a>
         = std::io::Take<&'a mut R>
@@ -187,24 +213,25 @@ where
 
 impl<R> BoundedReader for std::io::Take<R>
 where
-    R: std::io::Read,
+    R: std::io::Read + SetBlocking,
 {
     fn remaining(&self) -> usize {
         self.limit() as usize
     }
+}
 
-    fn discard(&mut self, amount: usize) -> Result<(), Self::Error> {
-        if amount != 0 {
-            let mut reader = <&mut std::io::Take<R> as std::io::Read>::take(self, amount as u64);
-            let _ = std::io::copy(&mut reader, &mut std::io::sink())?;
-        }
-        Ok(())
+impl<R> SetBlocking for flate2::bufread::ZlibDecoder<R>
+where
+    R: std::io::BufRead + SetBlocking,
+{
+    fn set_blocking(&mut self, blocking: bool) {
+        self.get_mut().set_blocking(blocking);
     }
 }
 
 impl<R> DecompressableReader for R
 where
-    R: std::io::BufRead,
+    R: std::io::BufRead + SetBlocking,
 {
     type DecompressReader<'a>
         = flate2::bufread::ZlibDecoder<&'a mut R>
@@ -216,12 +243,59 @@ where
     }
 }
 
-impl CompressionWriter for flate2::write::ZlibEncoder<std::vec::Vec<u8>> {
-    type Bytes = std::vec::Vec<u8>;
+pub struct CachedPreCompressionWriter(flate2::write::ZlibEncoder<std::vec::Vec<u8>>);
 
-    fn into_bytes(self) -> Result<Self::Bytes, Self::Error> {
-        let inner = self.finish()?;
-        Ok(inner)
+impl Writer for CachedPreCompressionWriter {
+    type Error = std::io::Error;
+
+    fn write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        self.0.write(data)?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        // Handled in `Self::finish`
+        Ok(())
+    }
+}
+
+impl PreCompressionWriter for CachedPreCompressionWriter {
+    type Payload = std::vec::Vec<u8>;
+
+    fn finish(self) -> Result<(usize, Self::Payload), Self::Error> {
+        let payload = self.0.flush_finish()?;
+        Ok((payload.len(), payload))
+    }
+}
+
+pub struct CachedCompressionWriter<W>(W);
+
+impl<W> Writer for CachedCompressionWriter<W>
+where
+    W: std::io::Write,
+{
+    type Error = std::io::Error;
+
+    fn write(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+        // Handled in `Self::initialize`
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.0.flush()?;
+        Ok(())
+    }
+}
+
+impl<W> CompressionWriter for CachedCompressionWriter<W>
+where
+    W: std::io::Write,
+{
+    type Payload = std::vec::Vec<u8>;
+
+    fn initialize(&mut self, payload: Self::Payload) -> Result<(), Self::Error> {
+        self.0.write_all(&payload)?;
+        Ok(())
     }
 }
 
@@ -229,11 +303,25 @@ impl<W> CompressableWriter for W
 where
     W: std::io::Write,
 {
+    type Payload = std::vec::Vec<u8>;
     type Level = flate2::Compression;
-    type CompressionWriter = flate2::write::ZlibEncoder<std::vec::Vec<u8>>;
 
-    fn compression_writer(level: Self::Level) -> Self::CompressionWriter {
-        flate2::write::ZlibEncoder::new(std::vec::Vec::new(), level)
+    type PreCompressionWriter = CachedPreCompressionWriter;
+
+    type CompressionWriter<'a>
+        = CachedCompressionWriter<&'a mut W>
+    where
+        Self: 'a;
+
+    fn pre_compression_writer(level: &Self::Level) -> Self::PreCompressionWriter {
+        CachedPreCompressionWriter(flate2::write::ZlibEncoder::new(
+            std::vec::Vec::new(),
+            *level,
+        ))
+    }
+
+    fn with_compression(&mut self, _level: &Self::Level) -> Self::CompressionWriter<'_> {
+        CachedCompressionWriter(self)
     }
 }
 
@@ -253,9 +341,10 @@ impl<R: std::io::Read, W: std::io::Write> DefaultStreamProvider<R, W> {
             compression_level: flate2::Compression::default(),
         }
     }
+}
 
-    // TODO: Add warning about stale data in the buffer here
-    pub fn with_encryption(&mut self, key: [u8; 16]) {
+impl<R, W: std::io::Write> EncryptableStreamProvider for DefaultStreamProvider<R, W> {
+    fn with_encryption(&mut self, key: [u8; 16]) {
         self.reader.get_mut().with_encryption(&key);
         self.writer.with_encryption(&key);
     }
@@ -277,7 +366,10 @@ impl<R, W: std::io::Write> StreamProvider for DefaultStreamProvider<R, W> {
     }
 }
 
-impl<R: std::io::Read, W: std::io::Write> ReadStreamProvider for DefaultStreamProvider<R, W> {
+impl<R: std::io::Read + SetBlocking, W: std::io::Write> ReadStreamProvider
+    for DefaultStreamProvider<R, W>
+{
+    type Error = std::io::Error;
     type BaseReader<'a>
         = &'a mut std::io::BufReader<DefaultReader<R>>
     where
@@ -289,6 +381,7 @@ impl<R: std::io::Read, W: std::io::Write> ReadStreamProvider for DefaultStreamPr
 }
 
 impl<R: std::io::Read, W: std::io::Write> WriteStreamProvider for DefaultStreamProvider<R, W> {
+    type Error = std::io::Error;
     type BaseWriter<'a>
         = &'a mut DefaultWriter<std::io::BufWriter<W>>
     where

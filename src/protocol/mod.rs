@@ -2,12 +2,12 @@ use core::marker::PhantomData;
 
 use crate::{
     error::{ReadError, WriteError},
-    primatives::varint::VarInt,
+    primatives::{handshake_version::HandshakeVersion, varint::VarInt},
     to_writer_helper,
     traits::{
         BoundableDecompressableReader, BoundableReader, BoundedReader, CompressableWriter,
         CompressionWriter, DecompressableReader, HandshakeProtocolState, HasNextProtocolState,
-        Serializable, ToWriter, WriteStreamProvider, Writer,
+        PreCompressionWriter, Serializable, ToWriter, WriteStreamProvider, Writer,
     },
 };
 
@@ -15,12 +15,12 @@ pub mod versions;
 
 pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
 
-pub struct LegacyPingResponse<S: AsRef<str>> {
-    server_version: S,
-    motd: S,
-    player_count: S,
-    max_players: S,
-    payload_length: usize,
+macro_rules! write_legacy_string {
+    ($string:expr) => {
+        for codeunit in $string.encode_utf16() {
+            write!(u16, &codeunit);
+        }
+    };
 }
 
 fn utf16_code_units<S: AsRef<str>>(string: S) -> usize {
@@ -28,9 +28,56 @@ fn utf16_code_units<S: AsRef<str>>(string: S) -> usize {
     string.encode_utf16().count()
 }
 
-impl<S: AsRef<str>> LegacyPingResponse<S> {
+pub struct Legacy1_3PingResponse<S: AsRef<str>> {
+    motd: S,
+    player_count: S,
+    max_players: S,
+    payload_length: i16,
+}
+
+impl<S: AsRef<str>> Legacy1_3PingResponse<S> {
+    pub fn new(motd: S, player_count: S, max_players: S) -> Option<Self> {
+        let payload_length = 2
+            + utf16_code_units(&motd)
+            + utf16_code_units(&player_count)
+            + utf16_code_units(&max_players);
+
+        if payload_length > 0x100 {
+            None
+        } else {
+            Some(Self {
+                motd,
+                player_count,
+                max_players,
+                payload_length: payload_length as i16,
+            })
+        }
+    }
+}
+
+to_writer_helper!(Legacy1_3PingResponse<S: AsRef<str>>, this {
+    write!(u8, &0xFF);
+    // SAFETY: This is validated in the constructor
+    write!(i16, &this.payload_length);
+    write_legacy_string!(this.motd.as_ref());
+    write_legacy_string!("§");
+    write_legacy_string!(this.player_count.as_ref());
+    write_legacy_string!("§");
+    write_legacy_string!(this.max_players.as_ref());
+    Ok(())
+});
+
+pub struct Legacy1_6PingResponse<S: AsRef<str>> {
+    server_version: S,
+    motd: S,
+    player_count: S,
+    max_players: S,
+    payload_length: i16,
+}
+
+impl<S: AsRef<str>> Legacy1_6PingResponse<S> {
     pub fn new(server_version: S, motd: S, player_count: S, max_players: S) -> Option<Self> {
-        let payload_length = 11
+        let payload_length = 10
             + (utf16_code_units(&server_version)
                 + utf16_code_units(&motd)
                 + utf16_code_units(&player_count)
@@ -44,43 +91,35 @@ impl<S: AsRef<str>> LegacyPingResponse<S> {
                 motd,
                 player_count,
                 max_players,
-                payload_length,
+                payload_length: payload_length as i16,
             })
         }
     }
 }
 
-impl<S: AsRef<str>> Serializable for LegacyPingResponse<S> {
-    fn size(&self) -> usize {
-        3 + self.payload_length * 2
-    }
-}
-
-macro_rules! write_legacy_string {
-    ($string:expr) => {
-        for codeunit in $string.encode_utf16() {
-            write!(u16, &codeunit);
-        }
-        write!(u16, &0);
-    };
-}
-
-to_writer_helper!(LegacyPingResponse<S: AsRef<str>>, this {
+to_writer_helper!(Legacy1_6PingResponse<S: AsRef<str>>, this {
     write!(u8, &0xFF);
     // SAFETY: This is validated in the constructor
-    write!(i16, &(this.payload_length as i16));
+    write!(i16, &this.payload_length);
     write_legacy_string!("§1");
+    write!(u16, &0);
     write_legacy_string!("127");
+    write!(u16, &0);
     write_legacy_string!(this.server_version.as_ref());
+    write!(u16, &0);
     write_legacy_string!(this.motd.as_ref());
+    write!(u16, &0);
     write_legacy_string!(this.player_count.as_ref());
+    write!(u16, &0);
     write_legacy_string!(this.max_players.as_ref());
     Ok(())
 });
 
 pub enum Handshake {
     Standard,
-    Legacy,
+    Legacy1_6,
+    Legacy1_5,
+    Legacy1_3,
 }
 
 pub struct ProtocolHandler<P, S> {
@@ -124,15 +163,30 @@ impl<P, S: HasNextProtocolState> ProtocolHandler<P, S> {
 }
 
 impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
-    pub fn write_legacy_ping_response<String>(
+    pub fn write_legacy_1_6_ping_response<String>(
         &mut self,
-        response: &LegacyPingResponse<String>,
+        response: &Legacy1_6PingResponse<String>,
     ) -> Result<(), WriteError<<P::BaseWriter<'_> as Writer>::Error>>
     where
         String: AsRef<str>,
     {
         let mut writer = self.provider.write_stream();
-        response.to_writer(&mut writer)
+        response.to_writer(&mut writer)?;
+        writer.flush().map_err(WriteError::StreamError)?;
+        Ok(())
+    }
+
+    pub fn write_legacy_1_3_ping_response<String>(
+        &mut self,
+        response: &Legacy1_3PingResponse<String>,
+    ) -> Result<(), WriteError<<P::BaseWriter<'_> as Writer>::Error>>
+    where
+        String: AsRef<str>,
+    {
+        let mut writer = self.provider.write_stream();
+        response.to_writer(&mut writer)?;
+        writer.flush().map_err(WriteError::StreamError)?;
+        Ok(())
     }
 }
 
@@ -140,9 +194,9 @@ impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
 impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProtocolState>
     ProtocolHandler<P, S>
 {
-    pub async fn async_write_legacy_ping_response<String>(
+    pub async fn async_write_legacy_1_6_ping_response<String>(
         &mut self,
-        response: &LegacyPingResponse<String>,
+        response: &Legacy1_6PingResponse<String>,
     ) -> Result<
         (),
         WriteError<<P::AsyncBaseWriter<'_> as crate::traits::asynchronous::AsyncWriter>::Error>,
@@ -150,14 +204,46 @@ impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProto
     where
         String: AsRef<str>,
     {
-        use crate::traits::asynchronous::AsyncToWriter;
+        use crate::traits::asynchronous::{AsyncToWriter, AsyncWriter};
         let mut writer = self.provider.async_write_stream();
-        response.async_to_writer(&mut writer).await
+        response.async_to_writer(&mut writer).await?;
+        writer
+            .async_flush()
+            .await
+            .map_err(WriteError::StreamError)?;
+        Ok(())
+    }
+
+    pub async fn async_write_legacy_1_3_ping_response<String>(
+        &mut self,
+        response: &Legacy1_3PingResponse<String>,
+    ) -> Result<
+        (),
+        WriteError<<P::AsyncBaseWriter<'_> as crate::traits::asynchronous::AsyncWriter>::Error>,
+    >
+    where
+        String: AsRef<str>,
+    {
+        use crate::traits::asynchronous::{AsyncToWriter, AsyncWriter};
+        let mut writer = self.provider.async_write_stream();
+        response.async_to_writer(&mut writer).await?;
+        writer
+            .async_flush()
+            .await
+            .map_err(WriteError::StreamError)?;
+        Ok(())
     }
 }
 
 macro_rules! read_handshake_helper {
     ({$($func:tt)+}) => {
+        #[allow(unused)]
+        macro_rules! allow_unused {
+            ($val:ident) => {
+                let _ = &$val;
+            };
+        }
+
         impl<P: $crate::traits::ReadStreamProvider, S: $crate::traits::HandshakeProtocolState> ProtocolHandler<P, S> {
             pub fn read_handshake<H>(
                 &mut self,
@@ -170,8 +256,8 @@ macro_rules! read_handshake_helper {
                 }
 
                 macro_rules! with_bound {
-                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {{
-                        let mut $r_out = $r_in.with_bound($bound);
+                    ($reader:ident($bound:expr) => $bound_func:tt) => {{
+                        let mut $reader = $reader.with_bound($bound);
                         $bound_func
                     }};
                 }
@@ -186,6 +272,7 @@ macro_rules! read_handshake_helper {
 
                 macro_rules! discard_remaining {
                     ($reader:ident) => {{
+                        use $crate::traits::Reader;
                         let remaining = $reader.remaining();
                         $reader.discard(remaining).map_err(ReadError::StreamError)?;
                     }}
@@ -208,15 +295,19 @@ macro_rules! read_handshake_helper {
                 }
 
                 macro_rules! with_bound {
-                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {
-                    {
-                        #[allow(unused)]
-                        use $crate::traits::asynchronous::{AsyncBoundableReader, AsyncBoundableDecompressableReader, AsyncWrappedReader};
-                        let mut $r_out = $r_in.with_bound($bound);
-                        let result = $bound_func;
-                        $r_in = $r_out.into_parent();
-                        result
-                    }};
+                    ($reader:ident($bound:expr) => $bound_func:tt) => {
+                        {
+                            let (result, __reader) = {
+                                use $crate::traits::asynchronous::AsyncBoundableDecompressableReader;
+                                let mut $reader = $reader.with_bound($bound);
+                                let result = $bound_func;
+                                (result, $reader)
+                            };
+                            $reader = __reader.into();
+                            allow_unused!($reader);
+                            result
+                        }
+                    };
                 }
 
                 macro_rules! handle_packet {
@@ -229,7 +320,7 @@ macro_rules! read_handshake_helper {
 
                 macro_rules! discard_remaining {
                     ($reader:ident) => {{
-                        use $crate::traits::asynchronous::AsyncBoundedReader;
+                        use $crate::traits::asynchronous::{AsyncReader, AsyncBoundedReader};
                         let remaining = $reader.async_remaining().await;
                         $reader.async_discard(remaining).await.map_err(ReadError::StreamError)?;
                     }}
@@ -243,51 +334,55 @@ macro_rules! read_handshake_helper {
 
 read_handshake_helper!({
     let mut reader = read_stream!();
-
-    // 3-Byte VarInts are the maximum allowed for packet lengths
-    let packet_length: i32 = with_bound!(3, reader => varint_reader {
-        read!(VarInt, varint_reader).into()
-    });
-
-    if packet_length < 0 {
-        return Err(ReadError::NegativeLength {
-            name: "packet_length",
-        });
-    }
-
-    // VarInt interpretation of legacy ping handshake prefix
-    if packet_length == 0xFE {
-        // Bound the stream to sane default (the 1.7+ maximum packet size)
-        let result = with_bound!(MAX_PACKET_SIZE, reader => legacy_reader {
-            handle_packet!(Handshake::Legacy, legacy_reader)
-            // TODO: Figure out a way to properly bound this so end-users don't need to worry about
-            // properly handling the packet, will eventually need to do this for legacy packets
-            // anyway
-        });
-        let _ = reader;
-        result
-    } else {
-        // SAFETY: We validated that `packet_length` >= 0.
-        let result = with_bound!(packet_length as usize, reader => packet_reader {
-            let packet_id: i32 = read!(VarInt, packet_reader).into();
-            if let Some(designator) = S::designator_from_id(packet_id) {
-                let result = handle_packet!(designator, packet_reader);
-                discard_remaining!(packet_reader);
+    match read!(HandshakeVersion, reader) {
+        HandshakeVersion::Standard(bound) => {
+            with_bound!(reader(bound) => {
+                let packet_id: i32 = read!(VarInt, reader).into();
+                if let Some(designator) = S::designator_from_id(packet_id) {
+                    let result = handle_packet!(designator, reader);
+                    discard_remaining!(reader);
+                    result
+                } else {
+                    Err(ReadError::UnknownPacket {
+                        state: S::STATE_NAME,
+                        id: packet_id,
+                    })
+                }
+            })
+        }
+        HandshakeVersion::Legacy1_6(bound) => {
+            with_bound!(reader(bound) => {
+                let result = handle_packet!(Handshake::Legacy1_6, reader);
+                discard_remaining!(reader);
                 result
-            } else {
-                Err(ReadError::UnknownPacket {
-                    state: S::STATE_NAME,
-                    id: packet_id,
-                })
-            }
-        });
-        let _ = reader;
-        result
+            })
+        }
+        HandshakeVersion::Pre1_6 => {
+            with_bound!(reader(0) => {
+                let result = handle_packet!(Handshake::Legacy1_5, reader);
+                discard_remaining!(reader);
+                result
+            })
+        }
+        HandshakeVersion::Pre1_3 => {
+            with_bound!(reader(0) => {
+                let result = handle_packet!(Handshake::Legacy1_3, reader);
+                discard_remaining!(reader);
+                result
+            })
+        }
     }
 });
 
 macro_rules! read_packet_helper {
     ({$($func:tt)+}) => {
+        #[allow(unused)]
+        macro_rules! allow_unused {
+            ($val:ident) => {
+                let _ = &$val;
+            };
+        }
+
         impl<P: $crate::traits::ReadStreamProvider, S: $crate::traits::ProtocolState> ProtocolHandler<P, S> {
             pub fn read_packet<H>(
                 &mut self,
@@ -304,15 +399,15 @@ macro_rules! read_packet_helper {
                 }
 
                 macro_rules! with_bound {
-                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {{
-                        let mut $r_out = $r_in.with_bound($bound);
+                    ($reader:ident($bound:expr) => $bound_func:tt) => {{
+                        let mut $reader = $reader.with_bound($bound);
                         $bound_func
                     }};
                 }
 
                 macro_rules! with_decompression {
-                    ($r_in:ident => $r_out:ident $decomp_func:tt) => {{
-                        let mut $r_out = $r_in.with_decompression();
+                    ($reader:ident => $decomp_func:tt) => {{
+                        let mut $reader = $reader.with_decompression();
                         $decomp_func
                     }};
                 }
@@ -327,6 +422,7 @@ macro_rules! read_packet_helper {
 
                 macro_rules! discard_remaining {
                     ($reader:ident) => {{
+                        use $crate::traits::Reader;
                         let remaining = $reader.remaining();
                         $reader.discard(remaining).map_err(ReadError::StreamError)?;
                     }};
@@ -353,26 +449,37 @@ macro_rules! read_packet_helper {
                 }
 
                 macro_rules! with_bound {
-                    ($bound:expr, $r_in: ident => $r_out:ident $bound_func:tt) => {
-                    {
-                        #[allow(unused)]
-                        use $crate::traits::asynchronous::{AsyncBoundableReader, AsyncBoundableDecompressableReader, AsyncWrappedReader};
-                        let mut $r_out = $r_in.with_bound($bound);
-                        let result = $bound_func;
-                        $r_in = $r_out.into_parent();
-                        result
-                    }};
+                    ($reader:ident($bound:expr) => $bound_func:tt) => {
+                        {
+                            let (result, __reader) = {
+                                #[allow(unused)]
+                                use $crate::traits::asynchronous::{AsyncBoundableReader, AsyncBoundableDecompressableReader};
+                                let mut $reader = $reader.with_bound($bound);
+                                let result = $bound_func;
+                                (result, $reader)
+                            };
+                            $reader = __reader.into();
+                            allow_unused!($reader);
+                            result
+                        }
+                    };
                 }
 
                 macro_rules! with_decompression {
-                    ($r_in: ident => $r_out: ident $decomp_func:tt) => {{
-                        #[allow(unused)]
-                        use $crate::traits::asynchronous::{AsyncDecompressableReader, AsyncBoundableDecompressableReader, AsyncWrappedReader};
-                        let mut $r_out = $r_in.with_decompression();
-                        let result = $decomp_func;
-                        $r_in = $r_out.into_parent();
-                        result
-                    }};
+                    ($reader:ident => $decomp_func:tt) => {
+                        {
+                            let (result, __reader) = {
+                                #[allow(unused)]
+                                use $crate::traits::asynchronous::{AsyncDecompressableReader, AsyncBoundableDecompressableReader};
+                                let mut $reader = $reader.with_decompression();
+                                let result = $decomp_func;
+                                (result, $reader)
+                            };
+                            $reader = __reader.into();
+                            allow_unused!($reader);
+                            result
+                        }
+                    };
                 }
 
                 macro_rules! handle_packet {
@@ -385,7 +492,7 @@ macro_rules! read_packet_helper {
 
                 macro_rules! discard_remaining {
                     ($reader:ident) => {{
-                        use $crate::traits::asynchronous::AsyncBoundedReader;
+                        use $crate::traits::asynchronous::{AsyncReader, AsyncBoundedReader};
                         let remaining = $reader.async_remaining().await;
                         $reader.async_discard(remaining).await.map_err(ReadError::StreamError)?;
                     }}
@@ -402,8 +509,8 @@ read_packet_helper!({
     let mut reader = read_stream!();
 
     // 3-Byte VarInts are the maximum allowed for packet lengths
-    let packet_length: i32 = with_bound!(3, reader => varint_reader {
-        read!(VarInt, varint_reader).into()
+    let packet_length: i32 = with_bound!(reader(3) => {
+        read!(VarInt, reader).into()
     });
 
     if packet_length < 0 {
@@ -429,10 +536,10 @@ read_packet_helper!({
     }
 
     // SAFETY: We validated that `packet_length` >= 0.
-    let result = with_bound!(packet_length as usize, reader => packet_reader {
+    let result = with_bound!(reader(packet_length as usize) => {
         match compression_threshold {
             Some(_) => {
-                let data_length: i32 = read!(VarInt, packet_reader).into();
+                let data_length: i32 = read!(VarInt, reader).into();
                 if data_length < 0 {
                     return Err(ReadError::NegativeLength {
                         name: "uncompressed_size",
@@ -441,17 +548,17 @@ read_packet_helper!({
 
                 if data_length == 0 {
                     // Length of 0 means an uncompressed packet
-                    handle_helper!(packet_reader)
+                    handle_helper!(reader)
                 } else {
-                    with_decompression!(packet_reader => d_r {
+                    with_decompression!(reader => {
                         // SAFETY: We validated that `data_length` >= 0.
-                        with_bound!(data_length as usize, d_r => decompression_reader {
-                            handle_helper!(decompression_reader)
+                        with_bound!(reader(data_length as usize) => {
+                            handle_helper!(reader)
                         })
                     })
                 }
             }
-            None => handle_helper!(packet_reader),
+            None => handle_helper!(reader),
         }
     });
     let _ = reader;
@@ -464,13 +571,13 @@ macro_rules! write_packet_internal_helper {
             ProtocolHandler<P, S>
         {
             #[allow(unused)]
-            fn write_packet_internal<PACKET>(
+            fn write_packet_internal<$packet_type>(
                 &mut self,
                 id: i32,
                 packet: &$packet_type,
             ) -> Result<(), WriteError<<P::BaseWriter<'_> as $crate::traits::Writer>::Error>>
             where
-                $packet_type: $crate::traits::ToWriter,
+                $packet_type: $crate::traits::ToWriter + $crate::traits::Serializable,
             {
                 macro_rules! threshold {
                     () => (self.provider.compression_threshold())
@@ -484,16 +591,28 @@ macro_rules! write_packet_internal_helper {
                     () => (self.provider.write_stream())
                 }
 
-                macro_rules! compression_writer {
-                    ($level:expr) => {
-                        <P::BaseWriter<'_> as CompressableWriter>::compression_writer(
-                            $level,
-                        )
+                macro_rules! with_pre_compression {
+                    ($writer:ident($level:expr) => $p_c_func:tt) => {
+                        {
+                            let mut $writer = <P::BaseWriter<'_> as $crate::traits::CompressableWriter>::pre_compression_writer($level);
+                            $p_c_func;
+                            $writer.finish().map_err(WriteError::StreamError)?
+                        }
+                    }
+                }
+
+                macro_rules! with_compression {
+                    ($writer:ident($level:expr, $payload:ident) => $c_func:tt) => {
+                        {
+                            let mut $writer = $writer.with_compression($level);
+                            $writer.initialize($payload).map_err(WriteError::StreamError)?;
+                            $c_func;
+                        }
                     }
                 }
 
                 macro_rules! write {
-                    ($type:ty, $value:ident=> $writer:ident) => (<$type as $crate::traits::ToWriter>::to_writer(&$value, &mut $writer)?)
+                    ($type:ty, $value:ident => $writer:ident) => (<$type as $crate::traits::ToWriter>::to_writer(&$value, &mut $writer)?)
                 }
 
                 macro_rules! write_bytes {
@@ -502,14 +621,6 @@ macro_rules! write_packet_internal_helper {
 
                 macro_rules! flush {
                     ($writer:ident) => ($writer.flush().map_err(WriteError::StreamError)?)
-                }
-
-                macro_rules! compressor_to_bytes {
-                    ($compressor:ident) => {
-                        $compressor
-                            .into_bytes()
-                            .map_err(WriteError::StreamError)?
-                    }
                 }
 
                 let $id = id;
@@ -523,13 +634,13 @@ macro_rules! write_packet_internal_helper {
             ProtocolHandler<P, S>
         {
             #[allow(unused)]
-            async fn async_write_packet_internal<PACKET>(
+            async fn async_write_packet_internal<$packet_type>(
                 &mut self,
                 id: i32,
                 packet: &$packet_type,
             ) -> Result<(), WriteError<<P::AsyncBaseWriter<'_> as $crate::traits::asynchronous::AsyncWriter>::Error>>
             where
-                $packet_type: $crate::traits::asynchronous::AsyncToWriter,
+                $packet_type: $crate::traits::asynchronous::AsyncToWriter + $crate::traits::Serializable,
             {
                 macro_rules! threshold {
                     () => (self.provider.compression_threshold())
@@ -543,11 +654,29 @@ macro_rules! write_packet_internal_helper {
                     () => (self.provider.async_write_stream())
                 }
 
-                macro_rules! compression_writer {
-                    ($level:expr) => {
-                        <P::AsyncBaseWriter<'_> as $crate::traits::asynchronous::AsyncCompressableWriter>::async_compression_writer(
-                            $level,
-                        )
+                macro_rules! with_pre_compression {
+                    ($writer:ident($level:expr) => $p_c_func:tt) => {
+                        {
+                            use $crate::traits::asynchronous::{AsyncCompressableWriter, AsyncPreCompressionWriter};
+                            let mut $writer = <P::AsyncBaseWriter<'_> as AsyncCompressableWriter>::async_pre_compression_writer($level);
+                            $p_c_func;
+                            $writer.async_finish().await.map_err(WriteError::StreamError)?
+                        }
+                    }
+                }
+
+                macro_rules! with_compression {
+                    ($writer:ident($level:expr, $payload:ident) => $c_func:tt) => {
+                        {
+                            let __writer = {
+                                use $crate::traits::asynchronous::{AsyncCompressableWriter, AsyncCompressionWriter};
+                                let mut $writer = $writer.with_async_compression($level);
+                                $writer.async_initialize($payload).await.map_err(WriteError::StreamError)?;
+                                $c_func;
+                                $writer.into()
+                            };
+                            $writer = __writer;
+                        }
                     }
                 }
 
@@ -566,15 +695,6 @@ macro_rules! write_packet_internal_helper {
                     ($writer:ident) => {{
                         use $crate::traits::asynchronous::AsyncWriter;
                         $writer.async_flush().await.map_err(WriteError::StreamError)?
-                    }}
-                }
-
-                macro_rules! compressor_to_bytes {
-                    ($compressor:ident) => {{
-                        use $crate::traits::asynchronous::AsyncCompressionWriter;
-                        $compressor
-                            .async_into_bytes().await
-                            .map_err(WriteError::StreamError)?
                     }}
                 }
 
@@ -611,19 +731,18 @@ write_packet_internal_helper!((id, packet: PACKET) {
                 // SAFETY: `MAX_PACKET_SIZE` is less than `i32::MAX`.
                 let total_varint = VarInt::from(total_size as i32);
                 write!(VarInt, total_varint => writer);
+
                 // Uncompressed size of 0 denotes no compression.
                 let zero = VarInt::from(0);
                 write!(VarInt, zero => writer);
                 write!(VarInt, id_varint => writer);
                 write!(PACKET, packet => writer);
             } else {
-                let mut compression_writer = compression_writer!(compression_level);
-                write!(VarInt, id_varint => compression_writer);
-                write!(PACKET, packet => compression_writer);
-                flush!(compression_writer);
-
-                let compressed_data = compressor_to_bytes!(compression_writer);
-                let compressed_slice = compressed_data.as_ref();
+                let (compressed_size, payload) = with_pre_compression!(writer(&compression_level) => {
+                    write!(VarInt, id_varint => writer);
+                    write!(PACKET, packet => writer);
+                    flush!(writer);
+                });
 
                 let Ok(total_size): Result<i32, _> = total_size.try_into() else {
                     return Err(WriteError::OverSized {
@@ -634,7 +753,7 @@ write_packet_internal_helper!((id, packet: PACKET) {
                 };
 
                 let uncompressed_varint = VarInt::from(total_size);
-                let total_size = uncompressed_varint.size() + compressed_slice.len();
+                let total_size = uncompressed_varint.size() + compressed_size;
 
                 if total_size > MAX_PACKET_SIZE {
                     return Err(WriteError::OverSized {
@@ -648,7 +767,11 @@ write_packet_internal_helper!((id, packet: PACKET) {
                 let total_varint = VarInt::from(total_size as i32);
                 write!(VarInt, total_varint => writer);
                 write!(VarInt, uncompressed_varint => writer);
-                write_bytes!(compressed_slice => writer);
+
+                with_compression!(writer(&compression_level, payload) => {
+                    write!(VarInt, id_varint => writer);
+                    write!(PACKET, packet => writer);
+                });
             }
         }
         None => {
