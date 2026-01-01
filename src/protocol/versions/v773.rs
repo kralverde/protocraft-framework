@@ -1,4 +1,4 @@
-build_protocol!(v1_21_10(773):
+build_protocol!(v1_21_9(773):
     status:
         clientbound:
             0 => StatusResponse
@@ -261,3 +261,5 @@ build_protocol!(v1_21_10(773):
             0x40 => UseItem
             0x41 => CustomClickAction
 );
+
+pub use v1_21_9 as v1_21_10;
