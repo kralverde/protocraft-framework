@@ -1,7 +1,7 @@
 # Protocraft Framework
 
 This crate provides traits for receiving and sending Minecraft packets,
-synchronous and asynchronous default, strongly typed implementations of
+synchronous and asynchronous defaults, strongly typed implementations of
 protocol handlers, and (in progress) representations of every release
 protocol version in java Minecraft.
 
@@ -30,14 +30,14 @@ Version features remain `no_std` and `no_alloc`.
 | `tokio-defaults` | Implements a default asynchronous `StreamProvider` using `tokio` | `false` | `false` |
 | `futures-defaults` | Implements a default asynchronous `StreamProvider` using `futures_io` | `false` | `false` |
 
-## Minecraft Versions Not Implemented
+## Minecraft Versions Not Yet Implemented
 
-[ ] 1.21.11+
-[ ] 1.16.0 - 1.16.2
-[ ] 1.15.0 - 1.15.1
-[ ] 1.14.0 - 1.14.3
-[ ] 1.13.0
-[ ] pre 1.7 - 1.7.1
+- [ ] 1.21.11+
+- [ ] 1.16.0 - 1.16.2
+- [ ] 1.15.0 - 1.15.1
+- [ ] 1.14.0 - 1.14.3
+- [ ] 1.13.0
+- [ ] pre 1.7 - 1.7.1
 
 The goal is to support all release versions.
 
