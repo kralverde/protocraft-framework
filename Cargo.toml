@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A framework for handling minecraft packets"
-# TODO: Readme, repository
+repository = "https://github.com/kralverde/protocraft-framework"
 license = "MIT OR Apache-2.0"
 categories = ["no-std", "minecraft", "async", "protocol"]
 
