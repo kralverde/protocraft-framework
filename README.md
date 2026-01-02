@@ -46,9 +46,9 @@ The goal is to support all release versions.
 Packets since the Netty re-write are very complex. This library's goal is not
 to provide an implementation of every packet, but to provide the library user:
 
-[x] Allow the use of packets only in the correct protocol state.
-[x] Handle errors and parse packets outside of the actual content.
-[x] Provide the library user context of the type of packet being handled
+- [x] Allow the use of packets only in the correct protocol state.
+- [x] Handle errors and parse packets outside of the actual content.
+- [x] Provide the library user context of the type of packet being handled
 and a bounded stream reader to parse the packet contents themselves.
 
 ## Examples
