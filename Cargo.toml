@@ -6,7 +6,13 @@ rust-version = "1.85"
 description = "A framework for handling minecraft packets"
 repository = "https://github.com/kralverde/protocraft-framework"
 license = "MIT OR Apache-2.0"
-categories = ["no-std", "minecraft", "async", "protocol"]
+categories = [
+  "no-std",
+  "parsing",
+  "asynchronous",
+  "game-development",
+  "network-programming",
+]
 
 [features]
 # Minecraft Versions
