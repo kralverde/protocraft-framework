@@ -21,6 +21,15 @@ pub enum ReadError<E> {
         name: &'static str,
     },
     MalformedLegacyPing,
+    Custom {
+        text: &'static str,
+    },
+}
+
+impl<E> From<E> for ReadError<E> {
+    fn from(value: E) -> Self {
+        Self::StreamError(value)
+    }
 }
 
 #[derive(Debug)]
@@ -36,4 +45,13 @@ pub enum WriteError<E> {
         state: &'static str,
         id: i32,
     },
+    Custom {
+        text: &'static str,
+    },
+}
+
+impl<E> From<E> for WriteError<E> {
+    fn from(value: E) -> Self {
+        Self::StreamError(value)
+    }
 }

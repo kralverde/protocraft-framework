@@ -109,6 +109,9 @@ build_protocol_pre_1_21_2!(v1_7_2(4):
             0x17 => PluginMessage
 );
 
+#[allow(unused)]
 pub use v1_7_2 as v1_7_3;
+#[allow(unused)]
 pub use v1_7_2 as v1_7_4;
+#[allow(unused)]
 pub use v1_7_2 as v1_7_5;

@@ -262,4 +262,5 @@ build_protocol!(v1_21_9(773):
             0x41 => CustomClickAction
 );
 
+#[allow(unused)]
 pub use v1_21_9 as v1_21_10;

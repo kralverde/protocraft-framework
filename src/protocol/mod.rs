@@ -115,10 +115,16 @@ to_writer_helper!(Legacy1_6PingResponse<S: AsRef<str>>, this {
     Ok(())
 });
 
+/// Represents what version of handshake the client is sending.
 pub enum Handshake {
+    /// The modern handshake. The reader contains the contents of Handshake packet 0x00.
     Standard,
+    /// The 1.6 legacy handshake. The reader contains the `data` field of the `MC|PingHost` plugin
+    /// message packet.
     Legacy1_6,
+    /// A handshake from a client from version 1.4-1.5. The reader contains no data.
     Legacy1_5,
+    /// A handshake from a client from before version 1.4. The reader contains no data.
     Legacy1_3,
 }
 
@@ -594,7 +600,7 @@ macro_rules! write_packet_internal_helper {
                 macro_rules! with_pre_compression {
                     ($writer:ident($level:expr) => $p_c_func:tt) => {
                         {
-                            let mut $writer = <P::BaseWriter<'_> as $crate::traits::CompressableWriter>::pre_compression_writer($level);
+                            let mut $writer = $writer.pre_compression_writer($level);
                             $p_c_func;
                             $writer.finish().map_err(WriteError::StreamError)?
                         }

@@ -214,4 +214,5 @@ build_protocol!(v1_20_3(765):
             0x36 => UseItem
 );
 
+#[allow(unused)]
 pub use v1_20_3 as v1_20_4;

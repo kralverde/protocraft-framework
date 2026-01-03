@@ -162,4 +162,5 @@ build_protocol_pre_1_21_2!(v1_16_4(754):
             0x2F => UseItem
 );
 
+#[allow(unused)]
 pub use v1_16_4 as v1_16_5;

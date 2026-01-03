@@ -5,6 +5,11 @@ synchronous and asynchronous defaults, strongly typed implementations of
 protocol handlers, and (in progress) representations of every release
 protocol version in java Minecraft.
 
+## Examples
+
+See [Examples](examples/) for a basic synchronous and asynchronous server. [This](examples/basic_handshake.rs)
+serves as a basic example-tutorial.
+
 ## Features
 
 By default, this crate only provides synchronous traits and a packet
@@ -41,19 +46,21 @@ Version features remain `no_std` and `no_alloc`.
 
 The goal is to support all release versions.
 
+## Goals
+
+- [x] Allow only the use of valid packets depending on the protocol state
+and whether the packet is clientbound or serverbound.
+- [x] Handle errors and parse Minecraft packets to provide the user a window
+into the raw packet data.
+- [x] Provide sane defaults to handle compression and encryption.
+- [x] Support and detect different Minecraft versions.
+- [ ] Provide seemless inter-version support. (A WIP; Protocol versions are
+currently distinct from one another)
+
 ## Non-Goals
 
-Packets since the Netty re-write are very complex. This library's goal is not
-to provide an implementation of every packet, but to provide the library user:
-
-- [x] Allow the use of packets only in the correct protocol state.
-- [x] Handle errors and parse packets outside of the actual content.
-- [x] Provide the library user context of the type of packet being handled
-and a bounded stream reader to parse the packet contents themselves.
-
-## Examples
-
-See [Examples](examples/) for a basic synchronous and asynchronous server.
+Packets since the Netty re-write are very complex; this library does not provide
+distinct fields or provide serialization for subfields of packets.
 
 ## License
 

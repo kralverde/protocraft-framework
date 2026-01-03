@@ -1,34 +1,91 @@
+use core::time::Duration;
+
 use crate::traits::{Reader, SetBlocking, Writer};
 
 extern crate std;
 
-impl<R> SetBlocking for &mut R
-where
-    R: SetBlocking,
-{
-    fn set_blocking(&mut self, blocking: bool) {
-        (*self).set_blocking(blocking);
-    }
-}
-
 impl<R> SetBlocking for std::io::BufReader<R>
 where
-    R: SetBlocking,
+    R: SetBlocking<BlockingError = std::io::Error>,
 {
-    fn set_blocking(&mut self, blocking: bool) {
-        self.get_mut().set_blocking(blocking);
+    type BlockingError = std::io::Error;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        self.get_mut().set_blocking(blocking)
     }
 }
 
-impl SetBlocking for std::net::TcpStream {
-    fn set_blocking(&mut self, blocking: bool) {
-        self.set_nonblocking(!blocking).expect("");
+impl<R> SetBlocking for std::io::Take<R>
+where
+    R: SetBlocking<BlockingError = std::io::Error>,
+{
+    type BlockingError = std::io::Error;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        self.get_mut().set_blocking(blocking)
     }
+}
+
+// std::io::Read implementors that allow non-blocking
+impl SetBlocking for std::net::TcpStream {
+    type BlockingError = std::io::Error;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        self.set_nonblocking(!blocking)
+    }
+}
+impl SetBlocking for std::boxed::Box<std::net::TcpStream> {
+    type BlockingError = std::io::Error;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        self.set_nonblocking(!blocking)
+    }
+}
+impl SetBlocking for &std::net::TcpStream {
+    type BlockingError = std::io::Error;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        self.set_nonblocking(!blocking)
+    }
+}
+impl SetBlocking for std::boxed::Box<&std::net::TcpStream> {
+    type BlockingError = std::io::Error;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        self.set_nonblocking(!blocking)
+    }
+}
+
+// std::io::Read implementors that do not allow non-blocking
+macro_rules! default_helper {
+    ($type:ty) => {
+        impl SetBlocking for $type {
+            type BlockingError = std::io::Error;
+        }
+        impl SetBlocking for std::boxed::Box<$type> {
+            type BlockingError = std::io::Error;
+        }
+    };
+}
+default_helper!(&[u8]);
+default_helper!(std::fs::File);
+default_helper!(&std::fs::File);
+default_helper!(std::sync::Arc<std::fs::File>);
+default_helper!(std::io::Stdin);
+default_helper!(&std::io::Stdin);
+default_helper!(std::io::StdinLock<'_>);
+default_helper!(std::process::ChildStdin);
+default_helper!(std::process::ChildStdout);
+default_helper!(std::io::Empty);
+default_helper!(std::io::Repeat);
+default_helper!(std::collections::VecDeque<u8>);
+impl<T: AsRef<[u8]>> SetBlocking for std::io::Cursor<T> {
+    type BlockingError = std::io::Error;
 }
 
 impl<R> Reader for R
 where
-    R: std::io::Read + SetBlocking,
+    R: std::io::Read + SetBlocking<BlockingError = std::io::Error>,
 {
     type Error = std::io::Error;
 
@@ -38,29 +95,25 @@ where
     }
 
     fn try_read_byte(&mut self) -> Result<Option<u8>, Self::Error> {
+        // FIXME: Is there a better way to do this than sleeping to ensure all bytes have been sent
+        // over the network? This function is only used once during the handshake.
+        std::thread::sleep(Duration::from_millis(5));
+
         let mut buf = [0u8; 1];
 
-        self.set_blocking(false);
-        let result = match <Self as std::io::Read>::read(self, &mut buf) {
-            Ok(amount) => {
-                if amount == 0 {
-                    Ok(None)
-                } else {
-                    Ok(Some(buf[0]))
-                }
-            }
-            Err(err) => {
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                ) {
+        self.set_blocking(false)?;
+        let result = <Self as std::io::Read>::read_exact(self, &mut buf);
+        let result = result.map_or_else(
+            |err| {
+                if err.kind() == std::io::ErrorKind::WouldBlock {
                     Ok(None)
                 } else {
                     Err(err)
                 }
-            }
-        };
-        self.set_blocking(true);
+            },
+            |_| Ok(Some(buf[0])),
+        );
+        self.set_blocking(true)?;
         result
     }
 

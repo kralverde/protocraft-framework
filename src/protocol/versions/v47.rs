@@ -120,12 +120,21 @@ build_protocol_pre_1_21_2!(v1_8_0(47):
             0x19 => ResourcePackStatus
 );
 
+#[allow(unused)]
 pub use v1_8_0 as v1_8_1;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_2;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_3;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_4;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_5;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_6;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_7;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_8;
+#[allow(unused)]
 pub use v1_8_0 as v1_8_9;

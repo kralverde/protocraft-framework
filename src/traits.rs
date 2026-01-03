@@ -3,14 +3,32 @@ use crate::{
     protocol::Handshake,
 };
 
+/// Makes a synchronous reader non-blocking. Only used during the handshake state to determine if
+/// the client is sending a legacy handshake. `Self::set_blocking` may be a no-op with no issues if
+/// you do not care about this functionality.
 pub trait SetBlocking {
+    type BlockingError;
     /// Makes the underlying reader blocking or non-blocking. Only used for
     /// `Reader::try_read_byte`.
-    fn set_blocking(&mut self, _blocking: bool) {}
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        let _ = blocking;
+        Ok(())
+    }
+}
+
+impl<R> SetBlocking for &mut R
+where
+    R: SetBlocking,
+{
+    type BlockingError = R::BlockingError;
+
+    fn set_blocking(&mut self, blocking: bool) -> Result<(), Self::BlockingError> {
+        (*self).set_blocking(blocking)
+    }
 }
 
 /// A trait that describes how bytes are retrieved from a stream. Analogous to `std::io::Read`.
-pub trait Reader: SetBlocking {
+pub trait Reader: SetBlocking<BlockingError = Self::Error> {
     /// Returned when `Self::read_exact` cannot fill the buffer `buf` completely.
     type Error;
 
@@ -20,6 +38,7 @@ pub trait Reader: SetBlocking {
     /// Attempts to read a byte from the stream *without blocking*. Returns `Some(u8)` if a byte could be read, `None`
     /// if the stream would block, or `Err` for any other errors. Only used during the handshake
     /// state to determine what version of handshake the client is using.
+    #[doc(hidden)]
     fn try_read_byte(&mut self) -> Result<Option<u8>, Self::Error>;
 
     /// Discards exactly `amount` bytes from the stream, returning an error if it cannot be done.
@@ -114,7 +133,9 @@ pub trait CompressableWriter: Writer {
     /// A type used to communicate between the `PreCompressionWriter` and the `CompressionWriter`.
     type Payload;
 
-    type PreCompressionWriter: PreCompressionWriter<Error = Self::Error, Payload = Self::Payload>;
+    type PreCompressionWriter<'a>: PreCompressionWriter<Error = Self::Error, Payload = Self::Payload>
+    where
+        Self: 'a;
 
     type CompressionWriter<'a>: CompressionWriter<Error = Self::Error, Payload = Self::Payload>
     where
@@ -122,7 +143,7 @@ pub trait CompressableWriter: Writer {
 
     /// A `PreCompressionWriter` is used to determine the size of the compressed data that is
     /// compressed with `CompressionWriter`. It should make no writes to the underlying `Writer`.
-    fn pre_compression_writer(level: &Self::Level) -> Self::PreCompressionWriter;
+    fn pre_compression_writer(&mut self, level: &Self::Level) -> Self::PreCompressionWriter<'_>;
 
     /// A `CompressionWriter` performs ZLib compression on input bytes and writes the compressed
     /// bytes to the underlying writer.
@@ -304,10 +325,7 @@ pub mod asynchronous {
         type Level;
         type Payload: 'static;
 
-        type AsyncPreCompressionWriter: AsyncPreCompressionWriter<
-            Error = Self::Error,
-            Payload = Self::Payload,
-        >;
+        type AsyncPreCompressionWriter: AsyncPreCompressionWriter<Error = Self::Error, Payload = Self::Payload>;
 
         type AsyncCompressionWriter: AsyncCompressionWriter<Error = Self::Error, Payload = Self::Payload>
             + Into<Self>;
@@ -353,10 +371,7 @@ pub mod asynchronous {
     pub trait AsyncWriteStreamProvider: StreamProvider {
         type Error;
 
-        type AsyncBaseWriter<'a>: AsyncCompressableWriter<
-            Level = Self::CompressionLevel,
-            Error = Self::Error,
-        >
+        type AsyncBaseWriter<'a>: AsyncCompressableWriter<Level = Self::CompressionLevel, Error = Self::Error>
         where
             Self: 'a;
 

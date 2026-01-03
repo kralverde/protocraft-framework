@@ -181,4 +181,5 @@ build_protocol_pre_1_21_2!(v1_19_1(760):
             0x32 => UseItem
 );
 
+#[allow(unused)]
 pub use v1_19_1 as v1_19_2;

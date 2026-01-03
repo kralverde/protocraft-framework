@@ -85,7 +85,7 @@ v1_7_2 = []
 
 # Sane defaults
 std = [] # std
-defaults = ["std", "cfb8", "aes", "flate2"] # std
+defaults = ["std", "cfb8", "aes", "miniz_oxide"] # std
 async = []
 tokio-io = ["tokio", "async"] # std
 tokio-defaults = [
@@ -96,7 +96,7 @@ tokio-defaults = [
   "async-compression/tokio",
   "async-compression/zlib",
 ] # std
-futures-io = ["dep:futures-io", "futures-util", "async"] # std
+futures-io = ["dep:futures-io", "futures-util", "futures-time", "async"] # std
 futures-defaults = [
   "futures-io",
   "cfb8",
@@ -109,6 +109,7 @@ futures-defaults = [
 [dependencies]
 tokio = { version = "1.48.0", optional = true, default-features = false, features = [
   "io-util",
+  "time",
 ] }
 futures-io = { version = "0.3.31", optional = true, default-features = false, features = [
   "std",
@@ -118,10 +119,11 @@ futures-util = { version = "0.3.31", optional = true, default-features = false, 
   "io",
   "sink",
 ] }
+futures-time = { version = "3.0.1", optional = true, default-features = false }
 cfb8 = { version = "0.8.1", optional = true, default-features = false }
 aes = { version = "0.8.4", optional = true, default-features = false }
-flate2 = { version = "1.1.5", optional = true, default-features = false, features = [
-  "rust_backend",
+miniz_oxide = { version = "0.8.9", optional = true, default-features = false, features = [
+  "with-alloc",
 ] }
 async-compression = { version = "0.4.36", optional = true, default-features = false }
 
@@ -142,3 +144,7 @@ required-features = ["tokio-defaults", "example_helpers/async"]
 [[example]]
 name = "server_status_futures_async"
 required-features = ["futures-defaults", "example_helpers/async"]
+
+[[example]]
+name = "basic_handshake"
+required-features = ["defaults", "v1_7_10"]

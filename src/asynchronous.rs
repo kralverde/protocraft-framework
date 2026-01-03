@@ -3,6 +3,7 @@ mod tokio {
     use core::{
         future::Future,
         task::{Context, Poll, Waker},
+        time::Duration,
     };
 
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -30,6 +31,10 @@ mod tokio {
         }
 
         async fn async_try_read_byte(&mut self) -> Result<Option<u8>, Self::Error> {
+            // FIXME: Is there a better way to do this than sleeping to ensure all bytes have been sent
+            // over the network? This function is only used once during the handshake.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+
             let waker = Waker::noop();
             let mut context = Context::from_waker(waker);
 
@@ -81,6 +86,8 @@ pub use crate::asynchronous::tokio::TokioIo;
 
 #[cfg(feature = "futures-io")]
 mod futures {
+    use core::time::Duration;
+
     use futures_io::{AsyncRead, AsyncWrite};
     use futures_util::{AsyncReadExt, AsyncWriteExt, FutureExt};
 
@@ -107,7 +114,12 @@ mod futures {
         }
 
         async fn async_try_read_byte(&mut self) -> Result<Option<u8>, Self::Error> {
+            // FIXME: Is there a better way to do this than sleeping to ensure all bytes have been sent
+            // over the network? This function is only used once during the handshake.
+            futures_time::task::sleep(Duration::from_millis(5).into()).await;
+
             let mut buf = [0u8];
+
             match self.0.read_exact(&mut buf).now_or_never() {
                 Some(result) => {
                     result?;
