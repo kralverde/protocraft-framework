@@ -6,7 +6,16 @@ use core::{
 };
 
 use aes::cipher::{
-    generic_array::GenericArray, inout::InOutBuf, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+    BlockDecryptMut, BlockEncryptMut, KeyIvInit, generic_array::GenericArray, inout::InOutBuf,
+};
+use miniz_oxide::{
+    MZFlush,
+    deflate::{
+        CompressionLevel,
+        core::{CompressorOxide, deflate_flags},
+        stream::deflate,
+    },
+    inflate::stream::{InflateState, inflate},
 };
 use tokio::io::{
     AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
@@ -16,20 +25,54 @@ use tokio::io::{
 use crate::{
     asynchronous::TokioIo,
     traits::{
+        EncryptableStreamProvider, StreamProvider,
         asynchronous::{
             AsyncBoundableDecompressableReader, AsyncBoundableReader, AsyncBoundedReader,
             AsyncCompressableWriter, AsyncCompressionWriter, AsyncDecompressableReader,
             AsyncPreCompressionWriter, AsyncReadStreamProvider, AsyncWriteStreamProvider,
             AsyncWriter,
         },
-        EncryptableStreamProvider, StreamProvider,
     },
 };
 
-use async_compression::{
-    tokio::{bufread::ZlibDecoder, write::ZlibEncoder},
-    Level,
-};
+pub struct AsyncDecompressionReader<'a, R> {
+    state: &'a mut InflateState,
+    reader: R,
+}
+
+impl<R> AsyncRead for AsyncDecompressionReader<'_, R>
+where
+    R: AsyncBufRead + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let reader = &mut this.reader;
+        let state = &mut this.state;
+
+        tokio::pin!(reader);
+        let result = reader.as_mut().poll_fill_buf(cx)?;
+        let Poll::Ready(internal_buf) = result else {
+            return Poll::Pending;
+        };
+
+        let result = inflate(
+            state,
+            internal_buf,
+            buf.initialize_unfilled(),
+            MZFlush::None,
+        );
+        let _ = result.status.map_err(|err| {
+            tokio::io::Error::other(std::format!("Decompression error: {:?}", err))
+        })?;
+        reader.consume(result.bytes_consumed);
+
+        Poll::Ready(Ok(()))
+    }
+}
 
 pub struct AsyncDecryptionReader<R> {
     decryptor: cfb8::Decryptor<aes::Aes128>,
@@ -315,33 +358,46 @@ where
     }
 }
 
-impl<R> From<TokioIo<ZlibDecoder<R>>> for TokioIo<R>
-where
-    R: AsyncBufRead + Unpin,
-{
-    fn from(value: TokioIo<ZlibDecoder<R>>) -> Self {
-        TokioIo(value.0.into_inner())
-    }
-}
-
 impl<R> AsyncDecompressableReader for TokioIo<R>
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncDecompressReader = TokioIo<ZlibDecoder<R>>;
+    type AsyncDecompressReader = TokioIo<AsyncDecompressionReader<'static, R>>;
 
     fn with_decompression(self) -> Self::AsyncDecompressReader {
-        TokioIo(ZlibDecoder::new(self.0))
+        todo!()
     }
 }
 
-pub struct CachedPreCompressionWriter(ZlibEncoder<std::vec::Vec<u8>>);
+impl<R> From<TokioIo<AsyncDecompressionReader<'static, R>>> for TokioIo<R> {
+    fn from(value: TokioIo<AsyncDecompressionReader<'static, R>>) -> Self {
+        todo!()
+    }
+}
 
-impl AsyncWriter for CachedPreCompressionWriter {
+pub struct AsyncCachedPreCompressionWriter {
+    state: &'static mut CompressorOxide,
+    buffer: std::vec::Vec<u8>,
+}
+
+impl AsyncWriter for AsyncCachedPreCompressionWriter {
     type Error = tokio::io::Error;
 
     async fn async_write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
-        self.0.write_all(data).await?;
+        let mut offset = 0;
+        let mut buf = [0u8; 4096];
+        loop {
+            let result = deflate(self.state, &data[offset..], &mut buf, MZFlush::Sync);
+            let _ = result.status.map_err(|err| {
+                tokio::io::Error::other(std::format!("Compression error: {:?}", err))
+            })?;
+
+            self.buffer.extend_from_slice(&buf[..result.bytes_written]);
+            offset += result.bytes_consumed;
+            if offset == data.len() {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -351,12 +407,11 @@ impl AsyncWriter for CachedPreCompressionWriter {
     }
 }
 
-impl AsyncPreCompressionWriter for CachedPreCompressionWriter {
+impl AsyncPreCompressionWriter for AsyncCachedPreCompressionWriter {
     type Payload = std::vec::Vec<u8>;
 
-    async fn async_finish(mut self) -> Result<(usize, Self::Payload), Self::Error> {
-        self.0.flush().await?;
-        let buffer = self.0.into_inner();
+    async fn async_finish(self) -> Result<(usize, Self::Payload), Self::Error> {
+        let buffer = self.buffer;
         Ok((buffer.len(), buffer))
     }
 }
@@ -403,13 +458,13 @@ where
     W: AsyncWrite + Unpin,
 {
     type Payload = std::vec::Vec<u8>;
-    type Level = Level;
+    type Level = CompressionLevel;
 
-    type AsyncPreCompressionWriter = CachedPreCompressionWriter;
+    type AsyncPreCompressionWriter = AsyncCachedPreCompressionWriter;
     type AsyncCompressionWriter = CachedCompressionWriter<W>;
 
-    fn async_pre_compression_writer(level: &Self::Level) -> Self::AsyncPreCompressionWriter {
-        CachedPreCompressionWriter(ZlibEncoder::with_quality(std::vec::Vec::new(), *level))
+    fn async_pre_compression_writer(_level: &Self::Level) -> Self::AsyncPreCompressionWriter {
+        todo!()
     }
 
     fn with_async_compression(self, _level: &Self::Level) -> Self::AsyncCompressionWriter {
@@ -421,22 +476,31 @@ pub struct AsyncDefaultStreamProvider<R, W> {
     reader: BufReader<AsyncDefaultReader<R>>,
     writer: AsyncDefaultWriter<BufWriter<W>>,
     compression_threshold: Option<usize>,
-    compression_level: Level,
+    compression_level: CompressionLevel,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite> AsyncDefaultStreamProvider<R, W> {
-    pub fn new(reader: R, writer: W) -> Self {
+    pub fn new(
+        reader: R,
+        writer: W,
+        compression_level: CompressionLevel,
+        buffer_size: usize,
+    ) -> Self {
+        let mut compression_state =
+            std::boxed::Box::new(CompressorOxide::new(deflate_flags::TDEFL_WRITE_ZLIB_HEADER));
+        compression_state.set_compression_level(compression_level);
+
         Self {
-            reader: BufReader::with_capacity(4096, AsyncDefaultReader::Standard(reader)),
-            writer: AsyncDefaultWriter::Standard(BufWriter::with_capacity(4096, writer)),
+            reader: BufReader::with_capacity(buffer_size, AsyncDefaultReader::Standard(reader)),
+            writer: AsyncDefaultWriter::Standard(BufWriter::with_capacity(buffer_size, writer)),
             compression_threshold: None,
-            compression_level: Level::Default,
+            compression_level,
         }
     }
 }
 
 impl<R, W> StreamProvider for AsyncDefaultStreamProvider<R, W> {
-    type CompressionLevel = Level;
+    type CompressionLevel = CompressionLevel;
 
     fn set_compression_threshold(&mut self, threshold: Option<usize>) {
         self.compression_threshold = threshold;

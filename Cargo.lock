@@ -47,7 +47,6 @@ dependencies = [
  "futures-core",
  "futures-io",
  "pin-project-lite",
- "tokio",
 ]
 
 [[package]]

@@ -88,14 +88,7 @@ std = [] # std
 defaults = ["std", "cfb8", "aes", "miniz_oxide"] # std
 async = []
 tokio-io = ["tokio", "async"] # std
-tokio-defaults = [
-  "tokio-io",
-  "cfb8",
-  "aes",
-  "async-compression",
-  "async-compression/tokio",
-  "async-compression/zlib",
-] # std
+tokio-defaults = ["tokio-io", "cfb8", "aes", "miniz_oxide"] # std
 futures-io = ["dep:futures-io", "futures-util", "futures-time", "async"] # std
 futures-defaults = [
   "futures-io",

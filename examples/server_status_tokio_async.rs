@@ -1,13 +1,15 @@
 use std::net::SocketAddr;
 
 use example_helpers::async_handle_connection_with_errors;
+use miniz_oxide::deflate::CompressionLevel;
 use protocraft_framework::defaults::asynchronous::tokio::AsyncDefaultStreamProvider;
 use tokio::net::{TcpListener, TcpStream};
 
 async fn handle_connection(stream: TcpStream, socket: SocketAddr) {
     println!("Accepted connection: {}", socket);
     let (reader, writer) = stream.into_split();
-    let provider = AsyncDefaultStreamProvider::new(reader, writer);
+    let provider =
+        AsyncDefaultStreamProvider::new(reader, writer, CompressionLevel::DefaultCompression, 4096);
     if let Err(err) = async_handle_connection_with_errors(provider).await {
         println!("Error: {:?}", err);
     }
