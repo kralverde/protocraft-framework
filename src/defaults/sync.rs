@@ -142,7 +142,7 @@ where
 }
 
 pub struct DecompressionStateWrappedReader<'a, R> {
-    decompression_state: &'a mut std::boxed::Box<InflateState>,
+    decompression_state: &'a mut InflateState,
     reader: R,
 }
 
@@ -222,7 +222,7 @@ where
         let state = &mut self.decompression_state;
         state.reset_as(MinReset);
         DecompressionReader {
-            state: self.decompression_state,
+            state,
             reader: &mut self.reader,
         }
     }
@@ -443,19 +443,27 @@ pub struct DefaultStreamProvider<R, W: std::io::Write> {
 }
 
 impl<R: std::io::Read, W: std::io::Write> DefaultStreamProvider<R, W> {
-    pub fn new(reader: R, writer: W) -> Self {
+    pub fn new(
+        reader: R,
+        writer: W,
+        compression_level: CompressionLevel,
+        buffer_size: usize,
+    ) -> Self {
+        let mut compression_state =
+            std::boxed::Box::new(CompressorOxide::new(deflate_flags::TDEFL_WRITE_ZLIB_HEADER));
+        compression_state.set_compression_level(compression_level);
+
         Self {
-            reader: std::io::BufReader::with_capacity(4096, DefaultReader::Standard(reader)),
+            reader: std::io::BufReader::with_capacity(buffer_size, DefaultReader::Standard(reader)),
             writer: DefaultWriter {
                 writer: DefaultWriterType::Standard(std::io::BufWriter::with_capacity(
-                    4096, writer,
+                    buffer_size,
+                    writer,
                 )),
-                compression_state: std::boxed::Box::new(CompressorOxide::new(
-                    deflate_flags::TDEFL_WRITE_ZLIB_HEADER,
-                )),
+                compression_state,
             },
             compression_threshold: None,
-            compression_level: CompressionLevel::DefaultCompression,
+            compression_level,
             decompression_state: InflateState::new_boxed(DataFormat::Zlib),
         }
     }

@@ -1,5 +1,6 @@
 use std::net::TcpListener;
 
+use miniz_oxide::deflate::CompressionLevel;
 use protocraft_framework::{
     defaults::sync::DefaultStreamProvider,
     error::{ReadError, WriteError},
@@ -116,7 +117,8 @@ fn main() {
     // Create a stream provider using the `DefaultStreamProvider`. You should use the
     // `DefaultStreamProvider` unless you have a good reason not to. (Maybe you want to go ham and
     // write a Minecraft server for a embedded chip).
-    let stream_provider = DefaultStreamProvider::new(&stream, &stream);
+    let stream_provider =
+        DefaultStreamProvider::new(&stream, &stream, CompressionLevel::DefaultCompression, 4096);
 
     // Here we create a new serverside handler for protocol version 1.7.10 (We can also create a
     // clientside handler with `new_clientside` if you want to make a Minecraft client). This
