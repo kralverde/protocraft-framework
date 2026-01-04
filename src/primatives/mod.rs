@@ -1,3 +1,5 @@
+use crate::traits::Serializable;
+
 pub mod handshake_version;
 pub mod varint;
 
@@ -164,3 +166,21 @@ build_primative!(u128, 16);
 build_primative!(i128, 16);
 build_primative!(f32, 4);
 build_primative!(f64, 8);
+
+impl Serializable for bool {
+    #[inline]
+    fn size(&self) -> usize {
+        1
+    }
+}
+
+from_reader_helper!(bool {
+    let byte = read!(u8);
+    Ok(byte != 0)
+});
+
+to_writer_helper!(bool, this {
+    let byte = if *this {0x01} else {0x00};
+    write!(u8, &byte);
+    Ok(())
+});
