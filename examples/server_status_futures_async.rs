@@ -3,11 +3,14 @@ use std::net::{SocketAddr, TcpListener};
 use example_helpers::async_handle_connection_with_errors;
 use futures::executor;
 use futures_net::TcpStream;
-use protocraft_framework::defaults::asynchronous::futures::AsyncDefaultStreamProvider;
+use protocraft_framework::defaults::{
+    Compression, asynchronous::futures::AsyncDefaultStreamProvider,
+};
 
 async fn handle_connection(read_stream: TcpStream, write_stream: TcpStream, socket: SocketAddr) {
     println!("Accepted connection: {}", socket);
-    let provider = AsyncDefaultStreamProvider::new(read_stream, write_stream);
+    let provider =
+        AsyncDefaultStreamProvider::new(read_stream, write_stream, Compression::default(), 4096);
     if let Err(err) = async_handle_connection_with_errors(provider).await {
         println!("Error: {:?}", err);
     }

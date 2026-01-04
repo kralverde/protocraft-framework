@@ -2,7 +2,9 @@
 #[macro_export]
 macro_rules! _build_protocol_state {
     ($state:ident, $state_designator:ident, $state_name:literal, $($id:literal => $packet_name:ident)+) => {
+        /// The specific protocol state
         pub enum $state {}
+        /// The packets that are avaliable in the specific protocol state
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum $state_designator {
         $(
@@ -23,6 +25,7 @@ macro_rules! _build_protocol_state {
             }
         }
         impl $state_designator {
+            /// Returns the associated packet id for the packet type
             pub const fn id(&self) -> i32 {
                 match self {
                 $(
@@ -39,6 +42,8 @@ macro_rules! _build_protocol_state {
 macro_rules! _build_protocol_writer {
     ($state:ident, $reciprocal:ident) => {
         impl<P: $crate::traits::WriteStreamProvider> $crate::protocol::ProtocolHandler<P, $state> {
+            /// Writes a packet to the stream given a packet type `packet` and the internal packet
+            /// data `payload`.
             pub fn write_packet<PACKET>(
                 &mut self,
                 packet: $reciprocal,
@@ -54,6 +59,8 @@ macro_rules! _build_protocol_writer {
             }
         }
 
+        /// Writes a packet to the stream given a packet type `packet` and the internal packet
+        /// data `payload`.
         #[cfg(feature = "async")]
         impl<P: $crate::traits::asynchronous::AsyncWriteStreamProvider>
             $crate::protocol::ProtocolHandler<P, $state>
@@ -102,8 +109,10 @@ macro_rules! build_protocol {
                 $( $p_s_id:literal => $p_s_name:ident )+
     ) => {
         pub mod $name {
+            /// The protocol version number
             pub const VERSION: u16 = $version;
 
+            /// Represents a client in the handshake state
             pub enum ClientboundHandshakeState {}
             impl $crate::traits::ProtocolState for ClientboundHandshakeState {
                 const STATE_NAME: &'static str = "clientbound_handshake";
@@ -114,6 +123,7 @@ macro_rules! build_protocol {
                 }
             }
 
+            /// Represents a server in the handshake state
             pub enum ServerboundHandshakeState {}
             impl $crate::traits::ProtocolState for ServerboundHandshakeState {
                 const STATE_NAME: &'static str = "serverbound_handshake";
@@ -178,6 +188,7 @@ macro_rules! build_protocol {
                 type NextState = ServerboundPlayState;
             }
 
+            /// Creates a new serverside protocol handler for this version
             pub fn new_serverside<P>(provider: P) -> $crate::protocol::ProtocolHandler<P, ServerboundHandshakeState> {
                 $crate::protocol::ProtocolHandler {
                     provider,
@@ -185,6 +196,7 @@ macro_rules! build_protocol {
                 }
             }
 
+            /// Creates a new clientside protocol handler for this version
             pub fn new_clientside<P>(provider: P) -> $crate::protocol::ProtocolHandler<P, ClientboundHandshakeState> {
                 $crate::protocol::ProtocolHandler {
                     provider,
@@ -215,8 +227,10 @@ macro_rules! build_protocol_pre_1_21_2 {
                 $( $p_s_id:literal => $p_s_name:ident )+
     ) => {
         pub mod $name {
+            /// The protocol version number
             pub const VERSION: u16 = $version;
 
+            /// Represents a client in the handshake state
             pub enum ClientboundHandshakeState {}
             impl $crate::traits::ProtocolState for ClientboundHandshakeState {
                 const STATE_NAME: &'static str = "clientbound_handshake";
@@ -227,6 +241,7 @@ macro_rules! build_protocol_pre_1_21_2 {
                 }
             }
 
+            /// Represents a server in the handshake state
             pub enum ServerboundHandshakeState {}
             impl $crate::traits::ProtocolState for ServerboundHandshakeState {
                 const STATE_NAME: &'static str = "serverbound_handshake";

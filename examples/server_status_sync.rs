@@ -4,9 +4,8 @@ use std::{
 };
 
 use example_helpers::handle_connection_with_errors;
-use miniz_oxide::deflate::CompressionLevel;
 use protocraft_framework::{
-    defaults::sync::DefaultStreamProvider,
+    defaults::{Compression, sync::DefaultStreamProvider},
     error::{ReadError, WriteError},
 };
 
@@ -20,12 +19,7 @@ enum Error {
 fn handle_connection(stream: TcpStream, socket: SocketAddr) {
     println!("Accepted connection: {}", socket);
     let other_stream = stream.try_clone().expect("Failed to clone stream");
-    let provider = DefaultStreamProvider::new(
-        stream,
-        other_stream,
-        CompressionLevel::DefaultCompression,
-        4096,
-    );
+    let provider = DefaultStreamProvider::new(stream, other_stream, Compression::default(), 4096);
     if let Err(err) = handle_connection_with_errors(provider) {
         println!("Error: {:?}", err);
     }

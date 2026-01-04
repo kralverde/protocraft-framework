@@ -28,6 +28,7 @@ fn utf16_code_units<S: AsRef<str>>(string: S) -> usize {
     string.encode_utf16().count()
 }
 
+/// Representation of the ping response for minecraft versions 1.3 and earlier.
 pub struct Legacy1_3PingResponse<S: AsRef<str>> {
     motd: S,
     player_count: S,
@@ -36,6 +37,8 @@ pub struct Legacy1_3PingResponse<S: AsRef<str>> {
 }
 
 impl<S: AsRef<str>> Legacy1_3PingResponse<S> {
+    /// Creates a ping response for minecraft versions 1.3 and earlier. Returns None if the payload
+    /// string is greater than 256 code units.
     pub fn new(motd: S, player_count: S, max_players: S) -> Option<Self> {
         let payload_length = 2
             + utf16_code_units(&motd)
@@ -67,6 +70,7 @@ to_writer_helper!(Legacy1_3PingResponse<S: AsRef<str>>, this {
     Ok(())
 });
 
+/// Representation of the ping response for minecraft versions 1.4-1.6.
 pub struct Legacy1_6PingResponse<S: AsRef<str>> {
     server_version: S,
     motd: S,
@@ -76,6 +80,8 @@ pub struct Legacy1_6PingResponse<S: AsRef<str>> {
 }
 
 impl<S: AsRef<str>> Legacy1_6PingResponse<S> {
+    /// Creates a ping response for minecraft versions 1.4-1.6. Returns None if the payload
+    /// string is greater than 32767 code units.
     pub fn new(server_version: S, motd: S, player_count: S, max_players: S) -> Option<Self> {
         let payload_length = 10
             + (utf16_code_units(&server_version)
@@ -128,6 +134,7 @@ pub enum Handshake {
     Legacy1_3,
 }
 
+/// Handles state and packets for a given stream provider and protocol state.
 pub struct ProtocolHandler<P, S> {
     provider: P,
     _x: PhantomData<S>,
@@ -144,6 +151,7 @@ impl<P, S> ProtocolHandler<P, S> {
 }
 
 impl<P, S: HandshakeProtocolState> ProtocolHandler<P, S> {
+    /// Takes this protocol handler from the handshake state to the status state
     pub fn into_status_state(self) -> ProtocolHandler<P, S::StatusState> {
         ProtocolHandler {
             provider: self.provider,
@@ -151,6 +159,7 @@ impl<P, S: HandshakeProtocolState> ProtocolHandler<P, S> {
         }
     }
 
+    /// Takes this protocol handler from the handshake state to the login state
     pub fn into_login_state(self) -> ProtocolHandler<P, S::LoginState> {
         ProtocolHandler {
             provider: self.provider,
@@ -160,6 +169,7 @@ impl<P, S: HandshakeProtocolState> ProtocolHandler<P, S> {
 }
 
 impl<P, S: HasNextProtocolState> ProtocolHandler<P, S> {
+    /// Takes this protocol handler to the next state
     pub fn into_next_state(self) -> ProtocolHandler<P, S::NextState> {
         ProtocolHandler {
             provider: self.provider,
@@ -169,6 +179,7 @@ impl<P, S: HasNextProtocolState> ProtocolHandler<P, S> {
 }
 
 impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
+    /// Writes a version 1.4-1.6 ping response to the stream.
     pub fn write_legacy_1_6_ping_response<String>(
         &mut self,
         response: &Legacy1_6PingResponse<String>,
@@ -182,6 +193,7 @@ impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
         Ok(())
     }
 
+    /// Writes a version 1.3 and previous ping response to the stream.
     pub fn write_legacy_1_3_ping_response<String>(
         &mut self,
         response: &Legacy1_3PingResponse<String>,
@@ -200,6 +212,7 @@ impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
 impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProtocolState>
     ProtocolHandler<P, S>
 {
+    /// Writes a version 1.4-1.6 ping response to the stream.
     pub async fn async_write_legacy_1_6_ping_response<String>(
         &mut self,
         response: &Legacy1_6PingResponse<String>,
@@ -220,6 +233,7 @@ impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProto
         Ok(())
     }
 
+    /// Writes a version 1.3 and previous ping response to the stream.
     pub async fn async_write_legacy_1_3_ping_response<String>(
         &mut self,
         response: &Legacy1_3PingResponse<String>,
@@ -251,6 +265,7 @@ macro_rules! read_handshake_helper {
         }
 
         impl<P: $crate::traits::ReadStreamProvider, S: $crate::traits::HandshakeProtocolState> ProtocolHandler<P, S> {
+            /// Reads an incoming handshake packet from the stream given a `ProtocolStateHandler`.
             pub fn read_handshake<H>(
                 &mut self,
             ) -> Result<H::Result, ReadError<<P::BaseReader<'_> as $crate::traits::Reader>::Error>>
@@ -290,6 +305,7 @@ macro_rules! read_handshake_helper {
 
         #[cfg(feature = "async")]
         impl<P: $crate::traits::asynchronous::AsyncReadStreamProvider, S: $crate::traits::HandshakeProtocolState> ProtocolHandler<P, S> {
+            /// Reads an incoming handshake packet from the stream given a `AsyncProtocolStateHandler`.
             pub async fn async_read_handshake<H>(
                 &mut self,
             ) -> Result<H::Result, ReadError<<P::AsyncBaseReader<'_> as $crate::traits::asynchronous::AsyncReader>::Error>>
@@ -390,6 +406,7 @@ macro_rules! read_packet_helper {
         }
 
         impl<P: $crate::traits::ReadStreamProvider, S: $crate::traits::ProtocolState> ProtocolHandler<P, S> {
+            /// Reads an incoming packet from the stream given a `ProtocolStateHandler`.
             pub fn read_packet<H>(
                 &mut self,
             ) -> Result<H::Result, ReadError<<P::BaseReader<'_> as $crate::traits::Reader>::Error>>
@@ -440,6 +457,7 @@ macro_rules! read_packet_helper {
 
         #[cfg(feature = "async")]
         impl<P: $crate::traits::asynchronous::AsyncReadStreamProvider, S: $crate::traits::ProtocolState> ProtocolHandler<P, S> {
+            /// Reads an incoming packet from the stream given a `AsyncProtocolStateHandler`.
             pub async fn async_read_packet<H>(
                 &mut self,
             ) -> Result<H::Result, ReadError<<P::AsyncBaseReader<'_> as $crate::traits::asynchronous::AsyncReader>::Error>>
@@ -663,10 +681,15 @@ macro_rules! write_packet_internal_helper {
                 macro_rules! with_pre_compression {
                     ($writer:ident($level:expr) => $p_c_func:tt) => {
                         {
-                            use $crate::traits::asynchronous::{AsyncCompressableWriter, AsyncPreCompressionWriter};
-                            let mut $writer = <P::AsyncBaseWriter<'_> as AsyncCompressableWriter>::async_pre_compression_writer($level);
-                            $p_c_func;
-                            $writer.async_finish().await.map_err(WriteError::StreamError)?
+                            let (size, data, __writer) = {
+                                use $crate::traits::asynchronous::{AsyncCompressableWriter, AsyncPreCompressionWriter};
+                                let mut $writer = $writer.async_pre_compression_writer($level);
+                                $p_c_func;
+                                $writer.async_finish().await.map_err(WriteError::StreamError)?
+                            };
+                            $writer = __writer;
+
+                            (size, data)
                         }
                     }
                 }

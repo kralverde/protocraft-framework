@@ -9,13 +9,12 @@ use aes::cipher::{
     BlockDecryptMut, BlockEncryptMut, KeyIvInit, generic_array::GenericArray, inout::InOutBuf,
 };
 use miniz_oxide::{
-    MZFlush,
+    DataFormat, MZFlush,
     deflate::{
-        CompressionLevel,
         core::{CompressorOxide, deflate_flags},
         stream::deflate,
     },
-    inflate::stream::{InflateState, inflate},
+    inflate::stream::{InflateState, MinReset, inflate},
 };
 use tokio::io::{
     AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
@@ -24,6 +23,7 @@ use tokio::io::{
 
 use crate::{
     asynchronous::TokioIo,
+    defaults::Compression,
     traits::{
         EncryptableStreamProvider, StreamProvider,
         asynchronous::{
@@ -34,6 +34,29 @@ use crate::{
         },
     },
 };
+
+// TODO: This code can be cleaned up, but it works :p
+
+pub struct TokioReader<'a, R> {
+    state: &'a mut InflateState,
+    reader: R,
+}
+
+impl<R> AsyncRead for TokioReader<'_, R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<tokio::io::Result<()>> {
+        let reader = &mut self.get_mut().reader;
+        tokio::pin!(reader);
+
+        reader.poll_read(cx, buf)
+    }
+}
 
 pub struct AsyncDecompressionReader<'a, R> {
     state: &'a mut InflateState,
@@ -48,7 +71,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    ) -> Poll<tokio::io::Result<()>> {
         let this = self.get_mut();
         let reader = &mut this.reader;
         let state = &mut this.state;
@@ -69,8 +92,39 @@ where
             tokio::io::Error::other(std::format!("Decompression error: {:?}", err))
         })?;
         reader.consume(result.bytes_consumed);
+        buf.advance(result.bytes_written);
 
         Poll::Ready(Ok(()))
+    }
+}
+
+impl<'a, R> AsyncBoundableReader for TokioIo<AsyncDecompressionReader<'a, R>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    type AsyncBoundedReader = TokioIo<Take<AsyncDecompressionReader<'a, R>>>;
+
+    fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
+        TokioIo(self.0.take(bound as u64))
+    }
+}
+
+impl<R> AsyncBoundedReader for TokioIo<Take<AsyncDecompressionReader<'_, R>>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    async fn async_remaining(&self) -> usize {
+        self.0.limit() as usize
+    }
+}
+
+impl<'a, R> From<TokioIo<Take<AsyncDecompressionReader<'a, R>>>>
+    for TokioIo<AsyncDecompressionReader<'a, R>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    fn from(value: TokioIo<Take<AsyncDecompressionReader<'a, R>>>) -> Self {
+        TokioIo(value.0.into_inner())
     }
 }
 
@@ -318,74 +372,133 @@ where
     }
 }
 
-impl<R> From<TokioIo<Take<R>>> for TokioIo<R>
+impl<'a, R> From<TokioIo<TokioReader<'a, Take<R>>>> for TokioIo<TokioReader<'a, R>>
 where
     R: AsyncRead + Unpin,
 {
-    fn from(value: TokioIo<Take<R>>) -> Self {
-        TokioIo(value.0.into_inner())
+    fn from(value: TokioIo<TokioReader<'a, Take<R>>>) -> Self {
+        TokioIo(TokioReader {
+            state: value.0.state,
+            reader: value.0.reader.into_inner(),
+        })
     }
 }
 
-impl<R> AsyncBoundableDecompressableReader for TokioIo<R>
+impl<'a, R> AsyncBoundableDecompressableReader for TokioIo<TokioReader<'a, R>>
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncBoundedReader = TokioIo<Take<R>>;
+    type AsyncBoundedReader = TokioIo<TokioReader<'a, Take<R>>>;
 
     fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
-        TokioIo(self.0.take(bound as u64))
+        TokioIo(TokioReader {
+            state: self.0.state,
+            reader: self.0.reader.take(bound as u64),
+        })
     }
 }
 
-impl<R> AsyncBoundableReader for TokioIo<R>
+impl<'a, R> AsyncBoundableReader for TokioIo<TokioReader<'a, R>>
 where
     R: AsyncRead + Unpin,
 {
-    type AsyncBoundedReader = TokioIo<Take<R>>;
+    type AsyncBoundedReader = TokioIo<TokioReader<'a, Take<R>>>;
 
     fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
-        TokioIo(self.0.take(bound as u64))
+        TokioIo(TokioReader {
+            state: self.0.state,
+            reader: self.0.reader.take(bound as u64),
+        })
     }
 }
 
-impl<R> AsyncBoundedReader for TokioIo<Take<R>>
+impl<R> AsyncBoundedReader for TokioIo<TokioReader<'_, Take<R>>>
 where
     R: AsyncRead + Unpin,
 {
     async fn async_remaining(&self) -> usize {
-        self.0.limit() as usize
+        self.0.reader.limit() as usize
     }
 }
 
-impl<R> AsyncDecompressableReader for TokioIo<R>
+impl<'a, R> AsyncDecompressableReader for TokioIo<TokioReader<'a, R>>
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncDecompressReader = TokioIo<AsyncDecompressionReader<'static, R>>;
+    type AsyncDecompressReader = TokioIo<AsyncDecompressionReader<'a, R>>;
 
     fn with_decompression(self) -> Self::AsyncDecompressReader {
-        todo!()
+        let state = self.0.state;
+        state.reset_as(MinReset);
+        TokioIo(AsyncDecompressionReader {
+            state,
+            reader: self.0.reader,
+        })
     }
 }
 
-impl<R> From<TokioIo<AsyncDecompressionReader<'static, R>>> for TokioIo<R> {
-    fn from(value: TokioIo<AsyncDecompressionReader<'static, R>>) -> Self {
-        todo!()
+impl<'a, R> From<TokioIo<AsyncDecompressionReader<'a, R>>> for TokioIo<TokioReader<'a, R>> {
+    fn from(value: TokioIo<AsyncDecompressionReader<'a, R>>) -> Self {
+        TokioIo(TokioReader {
+            state: value.0.state,
+            reader: value.0.reader,
+        })
     }
 }
 
-pub struct AsyncCachedPreCompressionWriter {
-    state: &'static mut CompressorOxide,
+pub struct TokioWriter<'a, W> {
+    state: &'a mut CompressorOxide,
+    writer: W,
+}
+
+impl<W> AsyncWrite for TokioWriter<'_, W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, tokio::io::Error>> {
+        let writer = &mut self.get_mut().writer;
+        tokio::pin!(writer);
+
+        writer.poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), tokio::io::Error>> {
+        let writer = &mut self.get_mut().writer;
+        tokio::pin!(writer);
+
+        writer.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), tokio::io::Error>> {
+        let writer = &mut self.get_mut().writer;
+        tokio::pin!(writer);
+
+        writer.poll_shutdown(cx)
+    }
+}
+
+pub struct AsyncCachedPreCompressionWriter<'a, W> {
+    state: &'a mut CompressorOxide,
     buffer: std::vec::Vec<u8>,
+    cached_writer: W,
 }
 
-impl AsyncWriter for AsyncCachedPreCompressionWriter {
+impl<W> AsyncWriter for AsyncCachedPreCompressionWriter<'_, W> {
     type Error = tokio::io::Error;
 
     async fn async_write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
         let mut offset = 0;
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 512];
         loop {
             let result = deflate(self.state, &data[offset..], &mut buf, MZFlush::Sync);
             let _ = result.status.map_err(|err| {
@@ -407,100 +520,149 @@ impl AsyncWriter for AsyncCachedPreCompressionWriter {
     }
 }
 
-impl AsyncPreCompressionWriter for AsyncCachedPreCompressionWriter {
-    type Payload = std::vec::Vec<u8>;
-
-    async fn async_finish(self) -> Result<(usize, Self::Payload), Self::Error> {
-        let buffer = self.buffer;
-        Ok((buffer.len(), buffer))
-    }
-}
-
-pub struct CachedCompressionWriter<W>(W);
-
-impl<W> AsyncWriter for CachedCompressionWriter<W>
+impl<'a, W> AsyncPreCompressionWriter for AsyncCachedPreCompressionWriter<'a, W>
 where
     W: AsyncWrite + Unpin,
 {
-    type Error = tokio::io::Error;
+    type Payload = std::vec::Vec<u8>;
+    type Parent = TokioIo<TokioWriter<'a, W>>;
 
-    async fn async_write(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
-        // Handled in `Self::initialize`
-        Ok(())
-    }
-
-    async fn async_flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush().await?;
-        Ok(())
+    async fn async_finish(self) -> Result<(usize, Self::Payload, Self::Parent), Self::Error> {
+        let buffer = self.buffer;
+        Ok((
+            buffer.len(),
+            buffer,
+            TokioIo(TokioWriter {
+                state: self.state,
+                writer: self.cached_writer,
+            }),
+        ))
     }
 }
 
-impl<W> AsyncCompressionWriter for CachedCompressionWriter<W>
+pub struct AsyncCachedCompressionWriter<W>(W);
+impl<W> AsyncWrite for AsyncCachedCompressionWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, tokio::io::Error>> {
+        // Handled in `AsyncCompressionWriter::async_initialize`
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), tokio::io::Error>> {
+        let writer = &mut self.get_mut().0;
+        tokio::pin!(writer);
+
+        writer.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), tokio::io::Error>> {
+        let writer = &mut self.get_mut().0;
+        tokio::pin!(writer);
+
+        writer.poll_shutdown(cx)
+    }
+}
+
+impl<W> AsyncCompressionWriter for TokioIo<TokioWriter<'_, AsyncCachedCompressionWriter<W>>>
 where
     W: AsyncWrite + Unpin,
 {
     type Payload = std::vec::Vec<u8>;
 
     async fn async_initialize(&mut self, payload: Self::Payload) -> Result<(), Self::Error> {
-        self.0.write_all(&payload).await?;
+        // Explicitly invoke the real writer; AsyncCachedCompressionWriter is a Sink.
+        self.0.writer.0.write_all(&payload).await?;
         Ok(())
     }
 }
 
-impl<W> From<CachedCompressionWriter<W>> for TokioIo<W> {
-    fn from(value: CachedCompressionWriter<W>) -> Self {
-        TokioIo(value.0)
+impl<'a, W> From<TokioIo<TokioWriter<'a, AsyncCachedCompressionWriter<W>>>>
+    for TokioIo<TokioWriter<'a, W>>
+{
+    fn from(value: TokioIo<TokioWriter<'a, AsyncCachedCompressionWriter<W>>>) -> Self {
+        TokioIo(TokioWriter {
+            state: value.0.state,
+            writer: value.0.writer.0,
+        })
     }
 }
 
-impl<W> AsyncCompressableWriter for TokioIo<W>
+impl<'a, W> AsyncCompressableWriter for TokioIo<TokioWriter<'a, W>>
 where
     W: AsyncWrite + Unpin,
 {
     type Payload = std::vec::Vec<u8>;
-    type Level = CompressionLevel;
+    type Level = Compression;
 
-    type AsyncPreCompressionWriter = AsyncCachedPreCompressionWriter;
-    type AsyncCompressionWriter = CachedCompressionWriter<W>;
+    type AsyncPreCompressionWriter = AsyncCachedPreCompressionWriter<'a, W>;
+    type AsyncCompressionWriter = TokioIo<TokioWriter<'a, AsyncCachedCompressionWriter<W>>>;
 
-    fn async_pre_compression_writer(_level: &Self::Level) -> Self::AsyncPreCompressionWriter {
-        todo!()
+    fn async_pre_compression_writer(self, _level: &Self::Level) -> Self::AsyncPreCompressionWriter {
+        let compressor = self.0.state;
+        //compressor.set_compression_level(*level);
+        compressor.reset();
+        AsyncCachedPreCompressionWriter {
+            state: compressor,
+            buffer: std::vec::Vec::new(),
+            cached_writer: self.0.writer,
+        }
     }
 
     fn with_async_compression(self, _level: &Self::Level) -> Self::AsyncCompressionWriter {
-        CachedCompressionWriter(self.0)
+        TokioIo(TokioWriter {
+            state: self.0.state,
+            writer: AsyncCachedCompressionWriter(self.0.writer),
+        })
     }
 }
 
+/// The default stream provider for Tokio.
 pub struct AsyncDefaultStreamProvider<R, W> {
     reader: BufReader<AsyncDefaultReader<R>>,
     writer: AsyncDefaultWriter<BufWriter<W>>,
     compression_threshold: Option<usize>,
-    compression_level: CompressionLevel,
+    compression_level: Compression,
+    compression_state: std::boxed::Box<CompressorOxide>,
+    decompression_state: std::boxed::Box<InflateState>,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite> AsyncDefaultStreamProvider<R, W> {
-    pub fn new(
-        reader: R,
-        writer: W,
-        compression_level: CompressionLevel,
-        buffer_size: usize,
-    ) -> Self {
+    /// Constructs a new `DefaultStreamProvider`.
+    /// `reader`: the stream of incoming data
+    /// `writer`: the stream of outgoing data
+    /// `compression_level`: see `Compression`
+    /// `buffer_size`: how many bytes to buffer. This size is used for both the `reader` and
+    /// `writer`, so the total buffer size is `buffer_size * 2`.
+    pub fn new(reader: R, writer: W, compression_level: Compression, buffer_size: usize) -> Self {
         let mut compression_state =
             std::boxed::Box::new(CompressorOxide::new(deflate_flags::TDEFL_WRITE_ZLIB_HEADER));
-        compression_state.set_compression_level(compression_level);
+        compression_state.set_compression_level_raw(compression_level.into());
 
         Self {
             reader: BufReader::with_capacity(buffer_size, AsyncDefaultReader::Standard(reader)),
             writer: AsyncDefaultWriter::Standard(BufWriter::with_capacity(buffer_size, writer)),
             compression_threshold: None,
             compression_level,
+            decompression_state: InflateState::new_boxed(DataFormat::Zlib),
+            compression_state,
         }
     }
 }
 
 impl<R, W> StreamProvider for AsyncDefaultStreamProvider<R, W> {
-    type CompressionLevel = CompressionLevel;
+    type CompressionLevel = Compression;
 
     fn set_compression_threshold(&mut self, threshold: Option<usize>) {
         self.compression_threshold = threshold;
@@ -526,12 +688,15 @@ impl<R: AsyncRead + Unpin, W> AsyncReadStreamProvider for AsyncDefaultStreamProv
     type Error = tokio::io::Error;
 
     type AsyncBaseReader<'a>
-        = TokioIo<&'a mut BufReader<AsyncDefaultReader<R>>>
+        = TokioIo<TokioReader<'a, &'a mut BufReader<AsyncDefaultReader<R>>>>
     where
         Self: 'a;
 
     fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_> {
-        TokioIo(&mut self.reader)
+        TokioIo(TokioReader {
+            state: &mut self.decompression_state,
+            reader: &mut self.reader,
+        })
     }
 }
 
@@ -539,11 +704,14 @@ impl<R, W: AsyncWrite + Unpin> AsyncWriteStreamProvider for AsyncDefaultStreamPr
     type Error = tokio::io::Error;
 
     type AsyncBaseWriter<'a>
-        = TokioIo<&'a mut AsyncDefaultWriter<BufWriter<W>>>
+        = TokioIo<TokioWriter<'a, &'a mut AsyncDefaultWriter<BufWriter<W>>>>
     where
         Self: 'a;
 
     fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_> {
-        TokioIo(&mut self.writer)
+        TokioIo(TokioWriter {
+            state: &mut self.compression_state,
+            writer: &mut self.writer,
+        })
     }
 }

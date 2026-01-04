@@ -6,31 +6,122 @@ use core::{
 };
 
 use aes::cipher::{
-    generic_array::GenericArray, inout::InOutBuf, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+    BlockDecryptMut, BlockEncryptMut, KeyIvInit, generic_array::GenericArray, inout::InOutBuf,
 };
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use futures_util::{
-    io::{BufReader, BufWriter, Take},
     AsyncReadExt, AsyncWriteExt,
+    io::{BufReader, BufWriter, Take},
+};
+use miniz_oxide::{
+    DataFormat, MZFlush,
+    deflate::{
+        core::{CompressorOxide, deflate_flags},
+        stream::deflate,
+    },
+    inflate::stream::{InflateState, MinReset, inflate},
 };
 
 use crate::{
     asynchronous::FuturesIo,
+    defaults::Compression,
     traits::{
+        EncryptableStreamProvider, StreamProvider,
         asynchronous::{
             AsyncBoundableDecompressableReader, AsyncBoundableReader, AsyncBoundedReader,
             AsyncCompressableWriter, AsyncCompressionWriter, AsyncDecompressableReader,
             AsyncPreCompressionWriter, AsyncReadStreamProvider, AsyncWriteStreamProvider,
             AsyncWriter,
         },
-        EncryptableStreamProvider, StreamProvider,
     },
 };
 
-use async_compression::{
-    futures::{bufread::ZlibDecoder, write::ZlibEncoder},
-    Level,
-};
+// TODO: This code can be cleaned up, but it works :p
+
+pub struct FuturesReader<'a, R> {
+    state: &'a mut InflateState,
+    reader: R,
+}
+
+impl<R> AsyncRead for FuturesReader<'_, R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<futures_io::Result<usize>> {
+        let reader = &mut self.get_mut().reader;
+        let reader = std::pin::pin!(reader);
+
+        reader.poll_read(cx, buf)
+    }
+}
+
+pub struct AsyncDecompressionReader<'a, R> {
+    state: &'a mut InflateState,
+    reader: R,
+}
+
+impl<R> AsyncRead for AsyncDecompressionReader<'_, R>
+where
+    R: AsyncBufRead + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<futures_io::Result<usize>> {
+        let this = self.get_mut();
+        let reader = &mut this.reader;
+        let state = &mut this.state;
+
+        let mut reader = std::pin::pin!(reader);
+        let result = reader.as_mut().poll_fill_buf(cx)?;
+        let Poll::Ready(internal_buf) = result else {
+            return Poll::Pending;
+        };
+
+        let result = inflate(state, internal_buf, buf, MZFlush::None);
+        let _ = result.status.map_err(|err| {
+            futures_io::Error::other(std::format!("Decompression error: {:?}", err))
+        })?;
+        reader.consume(result.bytes_consumed);
+
+        Poll::Ready(Ok(result.bytes_written))
+    }
+}
+
+impl<'a, R> AsyncBoundableReader for FuturesIo<AsyncDecompressionReader<'a, R>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    type AsyncBoundedReader = FuturesIo<Take<AsyncDecompressionReader<'a, R>>>;
+
+    fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
+        FuturesIo(self.0.take(bound as u64))
+    }
+}
+
+impl<R> AsyncBoundedReader for FuturesIo<Take<AsyncDecompressionReader<'_, R>>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    async fn async_remaining(&self) -> usize {
+        self.0.limit() as usize
+    }
+}
+
+impl<'a, R> From<FuturesIo<Take<AsyncDecompressionReader<'a, R>>>>
+    for FuturesIo<AsyncDecompressionReader<'a, R>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    fn from(value: FuturesIo<Take<AsyncDecompressionReader<'a, R>>>) -> Self {
+        FuturesIo(value.0.into_inner())
+    }
+}
 
 pub struct AsyncDecryptionReader<R> {
     decryptor: cfb8::Decryptor<aes::Aes128>,
@@ -46,13 +137,13 @@ where
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<futures_io::Result<usize>> {
-        let reader_ref = &mut self.as_mut().reader;
-        let reader = std::pin::pin!(reader_ref);
-        let result = reader.poll_read(cx, buf);
+        let reader = &mut self.as_mut().reader;
+        let reader = std::pin::pin!(reader);
 
-        if let Poll::Ready(Ok(amount)) = &result {
+        let result = reader.poll_read(cx, buf);
+        if let Poll::Ready(Ok(count)) = result {
             // We only want to decrypt what was just read
-            let io_buf: InOutBuf<u8> = (&mut buf[..*amount]).into();
+            let io_buf: InOutBuf<u8> = (&mut buf[..count]).into();
             let (chunks, tail) = io_buf.into_chunks();
             // SAFETY: Our chunk size is 1 byte. There will never be a tail.
             assert!(tail.is_empty());
@@ -273,73 +364,142 @@ where
     }
 }
 
-impl<R> From<FuturesIo<Take<R>>> for FuturesIo<R>
+impl<'a, R> From<FuturesIo<FuturesReader<'a, Take<R>>>> for FuturesIo<FuturesReader<'a, R>>
 where
     R: AsyncRead + Unpin,
 {
-    fn from(value: FuturesIo<Take<R>>) -> Self {
-        FuturesIo(value.0.into_inner())
+    fn from(value: FuturesIo<FuturesReader<'a, Take<R>>>) -> Self {
+        FuturesIo(FuturesReader {
+            state: value.0.state,
+            reader: value.0.reader.into_inner(),
+        })
     }
 }
 
-impl<R> AsyncBoundableDecompressableReader for FuturesIo<R>
+impl<'a, R> AsyncBoundableDecompressableReader for FuturesIo<FuturesReader<'a, R>>
 where
     R: AsyncBufRead + Unpin,
 {
-    type AsyncBoundedReader = FuturesIo<Take<R>>;
+    type AsyncBoundedReader = FuturesIo<FuturesReader<'a, Take<R>>>;
 
     fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
-        FuturesIo(self.0.take(bound as u64))
+        FuturesIo(FuturesReader {
+            state: self.0.state,
+            reader: self.0.reader.take(bound as u64),
+        })
     }
 }
 
-impl<R> AsyncBoundableReader for FuturesIo<R>
+impl<'a, R> AsyncBoundableReader for FuturesIo<FuturesReader<'a, R>>
 where
     R: AsyncRead + Unpin,
 {
-    type AsyncBoundedReader = FuturesIo<Take<R>>;
+    type AsyncBoundedReader = FuturesIo<FuturesReader<'a, Take<R>>>;
 
     fn with_bound(self, bound: usize) -> Self::AsyncBoundedReader {
-        FuturesIo(self.0.take(bound as u64))
+        FuturesIo(FuturesReader {
+            state: self.0.state,
+            reader: self.0.reader.take(bound as u64),
+        })
     }
 }
 
-impl<R> AsyncBoundedReader for FuturesIo<Take<R>>
+impl<R> AsyncBoundedReader for FuturesIo<FuturesReader<'_, Take<R>>>
 where
     R: AsyncRead + Unpin,
 {
     async fn async_remaining(&self) -> usize {
-        self.0.limit() as usize
+        self.0.reader.limit() as usize
     }
 }
 
-impl<R> From<FuturesIo<ZlibDecoder<R>>> for FuturesIo<R>
+impl<'a, R> AsyncDecompressableReader for FuturesIo<FuturesReader<'a, R>>
 where
     R: AsyncBufRead + Unpin,
 {
-    fn from(value: FuturesIo<ZlibDecoder<R>>) -> Self {
-        FuturesIo(value.0.into_inner())
-    }
-}
-
-impl<R> AsyncDecompressableReader for FuturesIo<R>
-where
-    R: AsyncBufRead + Unpin,
-{
-    type AsyncDecompressReader = FuturesIo<ZlibDecoder<R>>;
+    type AsyncDecompressReader = FuturesIo<AsyncDecompressionReader<'a, R>>;
 
     fn with_decompression(self) -> Self::AsyncDecompressReader {
-        FuturesIo(ZlibDecoder::new(self.0))
+        let state = self.0.state;
+        state.reset_as(MinReset);
+        FuturesIo(AsyncDecompressionReader {
+            state,
+            reader: self.0.reader,
+        })
     }
 }
 
-pub struct CachedPreCompressionWriter(ZlibEncoder<std::vec::Vec<u8>>);
+impl<'a, R> From<FuturesIo<AsyncDecompressionReader<'a, R>>> for FuturesIo<FuturesReader<'a, R>> {
+    fn from(value: FuturesIo<AsyncDecompressionReader<'a, R>>) -> Self {
+        FuturesIo(FuturesReader {
+            state: value.0.state,
+            reader: value.0.reader,
+        })
+    }
+}
 
-impl AsyncWriter for CachedPreCompressionWriter {
+pub struct FuturesWriter<'a, W> {
+    state: &'a mut CompressorOxide,
+    writer: W,
+}
+
+impl<W> AsyncWrite for FuturesWriter<'_, W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, futures_io::Error>> {
+        let writer = &mut self.get_mut().writer;
+        let writer = std::pin::pin!(writer);
+        writer.poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), futures_io::Error>> {
+        let writer = &mut self.get_mut().writer;
+        let writer = std::pin::pin!(writer);
+        writer.poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), futures_io::Error>> {
+        let writer = &mut self.get_mut().writer;
+        let writer = std::pin::pin!(writer);
+        writer.poll_close(cx)
+    }
+}
+
+pub struct AsyncCachedPreCompressionWriter<'a, W> {
+    state: &'a mut CompressorOxide,
+    buffer: std::vec::Vec<u8>,
+    cached_writer: W,
+}
+
+impl<W> AsyncWriter for AsyncCachedPreCompressionWriter<'_, W> {
     type Error = futures_io::Error;
 
     async fn async_write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
-        self.0.write_all(data).await?;
+        let mut offset = 0;
+        let mut buf = [0u8; 512];
+        loop {
+            let result = deflate(self.state, &data[offset..], &mut buf, MZFlush::Sync);
+            let _ = result.status.map_err(|err| {
+                futures_io::Error::other(std::format!("Compression error: {:?}", err))
+            })?;
+
+            self.buffer.extend_from_slice(&buf[..result.bytes_written]);
+            offset += result.bytes_consumed;
+            if offset == data.len() {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -349,92 +509,144 @@ impl AsyncWriter for CachedPreCompressionWriter {
     }
 }
 
-impl AsyncPreCompressionWriter for CachedPreCompressionWriter {
+impl<'a, W> AsyncPreCompressionWriter for AsyncCachedPreCompressionWriter<'a, W> {
     type Payload = std::vec::Vec<u8>;
+    type Parent = FuturesIo<FuturesWriter<'a, W>>;
 
-    async fn async_finish(mut self) -> Result<(usize, Self::Payload), Self::Error> {
-        self.0.flush().await?;
-        let buffer = self.0.into_inner();
-        Ok((buffer.len(), buffer))
+    async fn async_finish(self) -> Result<(usize, Self::Payload, Self::Parent), Self::Error> {
+        let buffer = self.buffer;
+        Ok((
+            buffer.len(),
+            buffer,
+            FuturesIo(FuturesWriter {
+                state: self.state,
+                writer: self.cached_writer,
+            }),
+        ))
     }
 }
 
-pub struct CachedCompressionWriter<W>(W);
-
-impl<W> AsyncWriter for CachedCompressionWriter<W>
+pub struct AsyncCachedCompressionWriter<W>(W);
+impl<W> AsyncWrite for AsyncCachedCompressionWriter<W>
 where
     W: AsyncWrite + Unpin,
 {
-    type Error = futures_io::Error;
-
-    async fn async_write(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
-        // Handled in `Self::initialize`
-        Ok(())
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, futures_io::Error>> {
+        // Handled in `AsyncCompressionWriter::async_initialize`
+        Poll::Ready(Ok(buf.len()))
     }
 
-    async fn async_flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush().await?;
-        Ok(())
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), futures_io::Error>> {
+        let writer = &mut self.get_mut().0;
+        let writer = std::pin::pin!(writer);
+        writer.poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), futures_io::Error>> {
+        let writer = &mut self.get_mut().0;
+        let writer = std::pin::pin!(writer);
+        writer.poll_close(cx)
     }
 }
 
-impl<W> AsyncCompressionWriter for CachedCompressionWriter<W>
+impl<W> AsyncCompressionWriter for FuturesIo<FuturesWriter<'_, AsyncCachedCompressionWriter<W>>>
 where
     W: AsyncWrite + Unpin,
 {
     type Payload = std::vec::Vec<u8>;
 
     async fn async_initialize(&mut self, payload: Self::Payload) -> Result<(), Self::Error> {
-        self.0.write_all(&payload).await?;
+        // Explicitly invoke the real writer; AsyncCachedCompressionWriter is a Sink.
+        self.0.writer.0.write_all(&payload).await?;
         Ok(())
     }
 }
 
-impl<W> From<CachedCompressionWriter<W>> for FuturesIo<W> {
-    fn from(value: CachedCompressionWriter<W>) -> Self {
-        FuturesIo(value.0)
+impl<'a, W> From<FuturesIo<FuturesWriter<'a, AsyncCachedCompressionWriter<W>>>>
+    for FuturesIo<FuturesWriter<'a, W>>
+{
+    fn from(value: FuturesIo<FuturesWriter<'a, AsyncCachedCompressionWriter<W>>>) -> Self {
+        FuturesIo(FuturesWriter {
+            state: value.0.state,
+            writer: value.0.writer.0,
+        })
     }
 }
 
-impl<W> AsyncCompressableWriter for FuturesIo<W>
+impl<'a, W> AsyncCompressableWriter for FuturesIo<FuturesWriter<'a, W>>
 where
     W: AsyncWrite + Unpin,
 {
     type Payload = std::vec::Vec<u8>;
-    type Level = Level;
+    type Level = Compression;
 
-    type AsyncPreCompressionWriter = CachedPreCompressionWriter;
-    type AsyncCompressionWriter = CachedCompressionWriter<W>;
+    type AsyncPreCompressionWriter = AsyncCachedPreCompressionWriter<'a, W>;
+    type AsyncCompressionWriter = FuturesIo<FuturesWriter<'a, AsyncCachedCompressionWriter<W>>>;
 
-    fn async_pre_compression_writer(level: &Self::Level) -> Self::AsyncPreCompressionWriter {
-        CachedPreCompressionWriter(ZlibEncoder::with_quality(std::vec::Vec::new(), *level))
+    fn async_pre_compression_writer(self, _level: &Self::Level) -> Self::AsyncPreCompressionWriter {
+        let compressor = self.0.state;
+        //compressor.set_compression_level(*level);
+        compressor.reset();
+        AsyncCachedPreCompressionWriter {
+            state: compressor,
+            buffer: std::vec::Vec::new(),
+            cached_writer: self.0.writer,
+        }
     }
 
     fn with_async_compression(self, _level: &Self::Level) -> Self::AsyncCompressionWriter {
-        CachedCompressionWriter(self.0)
+        FuturesIo(FuturesWriter {
+            state: self.0.state,
+            writer: AsyncCachedCompressionWriter(self.0.writer),
+        })
     }
 }
 
+/// The default stream provider for Tokio.
 pub struct AsyncDefaultStreamProvider<R, W> {
     reader: BufReader<AsyncDefaultReader<R>>,
     writer: AsyncDefaultWriter<BufWriter<W>>,
     compression_threshold: Option<usize>,
-    compression_level: Level,
+    compression_level: Compression,
+    compression_state: std::boxed::Box<CompressorOxide>,
+    decompression_state: std::boxed::Box<InflateState>,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite> AsyncDefaultStreamProvider<R, W> {
-    pub fn new(reader: R, writer: W) -> Self {
+    /// Constructs a new `DefaultStreamProvider`.
+    /// `reader`: the stream of incoming data
+    /// `writer`: the stream of outgoing data
+    /// `compression_level`: see `Compression`
+    /// `buffer_size`: how many bytes to buffer. This size is used for both the `reader` and
+    /// `writer`, so the total buffer size is `buffer_size * 2`.
+    pub fn new(reader: R, writer: W, compression_level: Compression, buffer_size: usize) -> Self {
+        let mut compression_state =
+            std::boxed::Box::new(CompressorOxide::new(deflate_flags::TDEFL_WRITE_ZLIB_HEADER));
+        compression_state.set_compression_level_raw(compression_level.into());
+
         Self {
-            reader: BufReader::with_capacity(4096, AsyncDefaultReader::Standard(reader)),
-            writer: AsyncDefaultWriter::Standard(BufWriter::with_capacity(4096, writer)),
+            reader: BufReader::with_capacity(buffer_size, AsyncDefaultReader::Standard(reader)),
+            writer: AsyncDefaultWriter::Standard(BufWriter::with_capacity(buffer_size, writer)),
             compression_threshold: None,
-            compression_level: Level::Default,
+            compression_level,
+            decompression_state: InflateState::new_boxed(DataFormat::Zlib),
+            compression_state,
         }
     }
 }
 
 impl<R, W> StreamProvider for AsyncDefaultStreamProvider<R, W> {
-    type CompressionLevel = Level;
+    type CompressionLevel = Compression;
 
     fn set_compression_threshold(&mut self, threshold: Option<usize>) {
         self.compression_threshold = threshold;
@@ -449,7 +661,7 @@ impl<R, W> StreamProvider for AsyncDefaultStreamProvider<R, W> {
     }
 }
 
-impl<R, W> EncryptableStreamProvider for AsyncDefaultStreamProvider<R, W> {
+impl<R: AsyncRead + Unpin, W> EncryptableStreamProvider for AsyncDefaultStreamProvider<R, W> {
     fn with_encryption(&mut self, key: [u8; 16]) {
         self.reader.get_mut().with_encryption(&key);
         self.writer.with_encryption(&key);
@@ -460,12 +672,15 @@ impl<R: AsyncRead + Unpin, W> AsyncReadStreamProvider for AsyncDefaultStreamProv
     type Error = futures_io::Error;
 
     type AsyncBaseReader<'a>
-        = FuturesIo<&'a mut BufReader<AsyncDefaultReader<R>>>
+        = FuturesIo<FuturesReader<'a, &'a mut BufReader<AsyncDefaultReader<R>>>>
     where
         Self: 'a;
 
     fn async_read_stream(&mut self) -> Self::AsyncBaseReader<'_> {
-        FuturesIo(&mut self.reader)
+        FuturesIo(FuturesReader {
+            state: &mut self.decompression_state,
+            reader: &mut self.reader,
+        })
     }
 }
 
@@ -473,11 +688,14 @@ impl<R, W: AsyncWrite + Unpin> AsyncWriteStreamProvider for AsyncDefaultStreamPr
     type Error = futures_io::Error;
 
     type AsyncBaseWriter<'a>
-        = FuturesIo<&'a mut AsyncDefaultWriter<BufWriter<W>>>
+        = FuturesIo<FuturesWriter<'a, &'a mut AsyncDefaultWriter<BufWriter<W>>>>
     where
         Self: 'a;
 
     fn async_write_stream(&mut self) -> Self::AsyncBaseWriter<'_> {
-        FuturesIo(&mut self.writer)
+        FuturesIo(FuturesWriter {
+            state: &mut self.compression_state,
+            writer: &mut self.writer,
+        })
     }
 }

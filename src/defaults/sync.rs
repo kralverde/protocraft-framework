@@ -6,17 +6,19 @@ use aes::cipher::{
 use miniz_oxide::{
     DataFormat, MZFlush,
     deflate::{
-        CompressionLevel,
         core::{CompressorOxide, deflate_flags},
         stream::deflate,
     },
     inflate::stream::{InflateState, MinReset, inflate},
 };
 
-use crate::traits::{
-    BoundableDecompressableReader, BoundableReader, BoundedReader, CompressableWriter,
-    CompressionWriter, DecompressableReader, EncryptableStreamProvider, PreCompressionWriter,
-    ReadStreamProvider, SetBlocking, StreamProvider, WriteStreamProvider, Writer,
+use crate::{
+    defaults::Compression,
+    traits::{
+        BoundableDecompressableReader, BoundableReader, BoundedReader, CompressableWriter,
+        CompressionWriter, DecompressableReader, EncryptableStreamProvider, PreCompressionWriter,
+        ReadStreamProvider, SetBlocking, StreamProvider, WriteStreamProvider, Writer,
+    },
 };
 
 pub struct DecompressionReader<'a, R> {
@@ -277,7 +279,7 @@ where
     }
 }
 
-pub enum DefaultWriterType<W> {
+pub enum DefaultWriterState<W> {
     Standard(W),
     Encrypt(std::boxed::Box<EncryptionWriter<W>>),
     Poisoned,
@@ -285,22 +287,22 @@ pub enum DefaultWriterType<W> {
 
 pub struct DefaultWriter<W> {
     compression_state: std::boxed::Box<CompressorOxide>,
-    writer: DefaultWriterType<W>,
+    writer: DefaultWriterState<W>,
 }
 
 impl<W> DefaultWriter<W> {
     fn with_encryption(&mut self, key: &[u8; 16]) {
-        match std::mem::replace(&mut self.writer, DefaultWriterType::Poisoned) {
-            DefaultWriterType::Standard(writer) => {
+        match std::mem::replace(&mut self.writer, DefaultWriterState::Poisoned) {
+            DefaultWriterState::Standard(writer) => {
                 let encryption_writer = EncryptionWriter {
                     encryptor: cfb8::Encryptor::new(key.into(), key.into()),
                     writer,
                     last_byte: None,
                 };
-                self.writer = DefaultWriterType::Encrypt(std::boxed::Box::new(encryption_writer));
+                self.writer = DefaultWriterState::Encrypt(std::boxed::Box::new(encryption_writer));
             }
-            DefaultWriterType::Encrypt(_) => panic!("We are already encrypting!"),
-            DefaultWriterType::Poisoned => unreachable!(),
+            DefaultWriterState::Encrypt(_) => panic!("We are already encrypting!"),
+            DefaultWriterState::Poisoned => unreachable!(),
         }
     }
 }
@@ -311,21 +313,21 @@ where
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match &mut self.writer {
-            DefaultWriterType::Standard(writer) => writer.write(buf),
-            DefaultWriterType::Encrypt(writer) => {
+            DefaultWriterState::Standard(writer) => writer.write(buf),
+            DefaultWriterState::Encrypt(writer) => {
                 <std::boxed::Box<EncryptionWriter<W>> as std::io::Write>::write(writer, buf)
             }
-            DefaultWriterType::Poisoned => unreachable!(),
+            DefaultWriterState::Poisoned => unreachable!(),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match &mut self.writer {
-            DefaultWriterType::Standard(writer) => writer.flush(),
-            DefaultWriterType::Encrypt(writer) => {
+            DefaultWriterState::Standard(writer) => writer.flush(),
+            DefaultWriterState::Encrypt(writer) => {
                 <std::boxed::Box<EncryptionWriter<W>> as std::io::Write>::flush(writer)
             }
-            DefaultWriterType::Poisoned => unreachable!(),
+            DefaultWriterState::Poisoned => unreachable!(),
         }
     }
 }
@@ -340,7 +342,7 @@ impl Writer for CachedPreCompressionWriter<'_> {
 
     fn write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
         let mut offset = 0;
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 512];
         loop {
             let result = deflate(self.state, &data[offset..], &mut buf, MZFlush::Sync);
             let _ = result.status.map_err(|err| {
@@ -407,7 +409,7 @@ where
     W: std::io::Write,
 {
     type Payload = std::vec::Vec<u8>;
-    type Level = CompressionLevel;
+    type Level = Compression;
 
     type PreCompressionWriter<'a>
         = CachedPreCompressionWriter<'a>
@@ -419,9 +421,9 @@ where
     where
         Self: 'a;
 
-    fn pre_compression_writer(&mut self, level: &Self::Level) -> Self::PreCompressionWriter<'_> {
+    fn pre_compression_writer(&mut self, _level: &Self::Level) -> Self::PreCompressionWriter<'_> {
         let compressor = &mut self.compression_state;
-        compressor.set_compression_level(*level);
+        //compressor.set_compression_level(*level);
         compressor.reset();
         CachedPreCompressionWriter {
             state: compressor,
@@ -438,25 +440,26 @@ pub struct DefaultStreamProvider<R, W: std::io::Write> {
     reader: std::io::BufReader<DefaultReader<R>>,
     writer: DefaultWriter<std::io::BufWriter<W>>,
     compression_threshold: Option<usize>,
-    compression_level: CompressionLevel,
+    compression_level: Compression,
     decompression_state: std::boxed::Box<InflateState>,
 }
 
 impl<R: std::io::Read, W: std::io::Write> DefaultStreamProvider<R, W> {
-    pub fn new(
-        reader: R,
-        writer: W,
-        compression_level: CompressionLevel,
-        buffer_size: usize,
-    ) -> Self {
+    /// Constructs a new `DefaultStreamProvider`.
+    /// `reader`: the stream of incoming data
+    /// `writer`: the stream of outgoing data
+    /// `compression_level`: see `Compression`
+    /// `buffer_size`: how many bytes to buffer. This size is used for both the `reader` and
+    /// `writer`, so the total buffer size is `buffer_size * 2`.
+    pub fn new(reader: R, writer: W, compression_level: Compression, buffer_size: usize) -> Self {
         let mut compression_state =
             std::boxed::Box::new(CompressorOxide::new(deflate_flags::TDEFL_WRITE_ZLIB_HEADER));
-        compression_state.set_compression_level(compression_level);
+        compression_state.set_compression_level_raw(compression_level.into());
 
         Self {
             reader: std::io::BufReader::with_capacity(buffer_size, DefaultReader::Standard(reader)),
             writer: DefaultWriter {
-                writer: DefaultWriterType::Standard(std::io::BufWriter::with_capacity(
+                writer: DefaultWriterState::Standard(std::io::BufWriter::with_capacity(
                     buffer_size,
                     writer,
                 )),
@@ -477,7 +480,7 @@ impl<R, W: std::io::Write> EncryptableStreamProvider for DefaultStreamProvider<R
 }
 
 impl<R, W: std::io::Write> StreamProvider for DefaultStreamProvider<R, W> {
-    type CompressionLevel = CompressionLevel;
+    type CompressionLevel = Compression;
 
     fn set_compression_threshold(&mut self, threshold: Option<usize>) {
         self.compression_threshold = threshold;

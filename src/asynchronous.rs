@@ -10,7 +10,8 @@ mod tokio {
 
     use crate::traits::asynchronous::{AsyncReader, AsyncWriter};
 
-    /// Wrapper type for types that implement tokio `AsyncRead` or `AsyncWrite`
+    /// Wrapper type for types that implement tokio `AsyncRead` or `AsyncWrite` to prevent
+    /// conflicts when all features are used
     pub struct TokioIo<S>(pub S);
 
     impl<S> From<S> for TokioIo<S> {
@@ -93,7 +94,8 @@ mod futures {
 
     use crate::traits::asynchronous::{AsyncReader, AsyncWriter};
 
-    /// Wrapper type for types that implement futures-io `AsyncRead` or `AsyncWrite`
+    /// Wrapper type for types that implement futures-io `AsyncRead` or `AsyncWrite` to prevent
+    /// conflicts when all features are used
     pub struct FuturesIo<S>(pub S);
 
     impl<S> From<S> for FuturesIo<S> {

@@ -307,10 +307,11 @@ pub mod asynchronous {
     /// Async equivalent of `PreCompressionWriter`
     pub trait AsyncPreCompressionWriter: AsyncWriter {
         type Payload;
+        type Parent;
 
         /// Returns the compressed data, the payload, and the parent writer that
         /// created this `AsyncPreCompressionWriter`.
-        async fn async_finish(self) -> Result<(usize, Self::Payload), Self::Error>;
+        async fn async_finish(self) -> Result<(usize, Self::Payload, Self::Parent), Self::Error>;
     }
 
     /// Async equivalent of `CompressionWriter`
@@ -323,14 +324,16 @@ pub mod asynchronous {
     /// Async equivalent of `CompressableWriter`
     pub trait AsyncCompressableWriter: AsyncWriter + Sized {
         type Level;
-        type Payload: 'static;
+        type Payload;
 
-        type AsyncPreCompressionWriter: AsyncPreCompressionWriter<Error = Self::Error, Payload = Self::Payload>;
-
+        type AsyncPreCompressionWriter: AsyncPreCompressionWriter<Error = Self::Error, Payload = Self::Payload, Parent = Self>;
         type AsyncCompressionWriter: AsyncCompressionWriter<Error = Self::Error, Payload = Self::Payload>
             + Into<Self>;
 
-        fn async_pre_compression_writer(level: &Self::Level) -> Self::AsyncPreCompressionWriter;
+        fn async_pre_compression_writer(
+            self,
+            level: &Self::Level,
+        ) -> Self::AsyncPreCompressionWriter;
 
         fn with_async_compression(self, level: &Self::Level) -> Self::AsyncCompressionWriter;
     }

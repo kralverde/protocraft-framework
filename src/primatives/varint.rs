@@ -6,6 +6,11 @@ use crate::{
 
 pub struct VarInt(i32);
 
+impl VarInt {
+    pub const ZERO: Self = Self(0);
+    pub const ONE: Self = Self(1);
+}
+
 impl From<i32> for VarInt {
     fn from(value: i32) -> Self {
         Self(value)
