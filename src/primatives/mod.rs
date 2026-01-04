@@ -1,4 +1,9 @@
-use crate::traits::Serializable;
+#[cfg(feature = "async")]
+use crate::traits::asynchronous::{AsyncFromReader, AsyncReader, AsyncToWriter, AsyncWriter};
+use crate::{
+    error::{ReadError, WriteError},
+    traits::{FromReader, Reader, Serializable, ToWriter, Writer},
+};
 
 pub mod handshake_version;
 pub mod varint;
@@ -184,3 +189,90 @@ to_writer_helper!(bool, this {
     write!(u8, &byte);
     Ok(())
 });
+
+impl<T> Serializable for Option<T>
+where
+    T: Serializable,
+{
+    #[inline]
+    fn size(&self) -> usize {
+        match self {
+            Some(val) => 1 + val.size(),
+            None => 1,
+        }
+    }
+}
+
+impl<T> FromReader for Option<T>
+where
+    T: FromReader,
+{
+    fn from_reader<R>(reader: &mut R) -> Result<Self, ReadError<R::Error>>
+    where
+        R: Reader,
+    {
+        Ok(if bool::from_reader(reader)? {
+            Some(T::from_reader(reader)?)
+        } else {
+            None
+        })
+    }
+}
+
+#[cfg(feature = "async")]
+impl<T> AsyncFromReader for Option<T>
+where
+    T: AsyncFromReader,
+{
+    async fn async_from_reader<R>(reader: &mut R) -> Result<Self, ReadError<R::Error>>
+    where
+        R: AsyncReader,
+    {
+        Ok(if bool::async_from_reader(reader).await? {
+            Some(T::async_from_reader(reader).await?)
+        } else {
+            None
+        })
+    }
+}
+
+impl<T> ToWriter for Option<T>
+where
+    T: ToWriter,
+{
+    fn to_writer<W>(&self, writer: &mut W) -> Result<(), WriteError<W::Error>>
+    where
+        W: Writer,
+    {
+        match self {
+            Some(val) => {
+                true.to_writer(writer)?;
+                val.to_writer(writer)?;
+            }
+            None => false.to_writer(writer)?,
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "async")]
+impl<T> AsyncToWriter for Option<T>
+where
+    T: AsyncToWriter,
+{
+    async fn async_to_writer<W>(&self, writer: &mut W) -> Result<(), WriteError<W::Error>>
+    where
+        W: AsyncWriter,
+    {
+        match self {
+            Some(val) => {
+                true.async_to_writer(writer).await?;
+                val.async_to_writer(writer).await?;
+            }
+            None => false.async_to_writer(writer).await?,
+        }
+
+        Ok(())
+    }
+}
