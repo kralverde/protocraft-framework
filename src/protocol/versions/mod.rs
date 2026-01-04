@@ -311,6 +311,11 @@ macro_rules! build_protocol_pre_1_21_2 {
 
 // See https://minecraft.wiki/w/Minecraft_Wiki:Projects/wiki.vg_merge/Protocol_version_numbers
 
+#[cfg(feature = "v1_21_11")]
+mod v774;
+#[cfg(feature = "v1_21_11")]
+pub use v774::v1_21_11;
+
 #[cfg(any(feature = "v1_21_10", feature = "v1_21_9"))]
 mod v773;
 #[cfg(feature = "v1_21_9")]

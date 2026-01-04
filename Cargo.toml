@@ -1,6 +1,6 @@
 [package]
 name = "protocraft_framework"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 description = "A framework for handling minecraft packets"
@@ -16,6 +16,7 @@ categories = [
 
 [features]
 # Minecraft Versions
+v1_21_11 = []
 v1_21_10 = []
 v1_21_9 = []
 v1_21_8 = []
