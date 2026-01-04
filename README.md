@@ -1,5 +1,10 @@
 # Protocraft Framework
 
+[![crates.io version][1]][2]
+[![downloads][5]][6] [![docs.rs docs][7]][8]
+![MIT or Apache 2.0 licensed][9]
+[![dependency status][10]][11]
+
 This crate provides traits for receiving and sending Minecraft packets,
 synchronous and asynchronous defaults, strongly typed implementations of
 protocol handlers, and (in progress) representations of every release
@@ -70,3 +75,13 @@ Licensed under either of
 - [MIT license](LICENSE-MIT)
 
 at your option.
+
+[1]: https://img.shields.io/crates/v/protocraft_framework.svg?style=flat-square
+[2]: https://crates.io/crates/protocraft_framework
+[5]: https://img.shields.io/crates/d/protocraft_framework.svg?style=flat-square
+[6]: https://crates.io/crates/protocraft_framework
+[7]: https://img.shields.io/badge/docs-latest-blue.svg?style=flat-square
+[8]: https://docs.rs/protocraft_framework
+[9]: https://img.shields.io/crates/l/protocraft_framework.svg?style=flat-square
+[10]: https://deps.rs/crate/protocraft_framework/latest/status.svg?style=flat-square
+[11]: https://deps.rs/crate/protocraft_framework
