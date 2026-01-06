@@ -375,7 +375,6 @@ sync_and_async_helper!({
                         v1_21_10::ServerboundStatusPacket::StatusRequest => None,
                         v1_21_10::ServerboundStatusPacket::Ping => Some(read!(reader => i64))
                     };
-
                     Ok(result)
                 });
 

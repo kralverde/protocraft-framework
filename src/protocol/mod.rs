@@ -58,7 +58,7 @@ impl<S: AsRef<str>> Legacy1_3PingResponse<S> {
     }
 }
 
-to_writer_helper!(Legacy1_3PingResponse<S: AsRef<str>>, this {
+to_writer_helper!(Legacy1_3PingResponse<S> where (S: AsRef<str>), (this){
     write!(u8, &0xFF);
     // SAFETY: This is validated in the constructor
     write!(i16, &this.payload_length);
@@ -103,7 +103,7 @@ impl<S: AsRef<str>> Legacy1_6PingResponse<S> {
     }
 }
 
-to_writer_helper!(Legacy1_6PingResponse<S: AsRef<str>>, this {
+to_writer_helper!(Legacy1_6PingResponse<S> where (S: AsRef<str>), (this){
     write!(u8, &0xFF);
     // SAFETY: This is validated in the constructor
     write!(i16, &this.payload_length);
@@ -187,10 +187,7 @@ impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
     where
         String: AsRef<str>,
     {
-        let mut writer = self.provider.write_stream();
-        response.to_writer(&mut writer)?;
-        writer.flush().map_err(WriteError::StreamError)?;
-        Ok(())
+        self.write_raw(response)
     }
 
     /// Writes a version 1.3 and previous ping response to the stream.
@@ -201,8 +198,19 @@ impl<P: WriteStreamProvider, S: HandshakeProtocolState> ProtocolHandler<P, S> {
     where
         String: AsRef<str>,
     {
+        self.write_raw(response)
+    }
+
+    /// Writes raw data to the underlying stream
+    pub fn write_raw<D>(
+        &mut self,
+        data: &D,
+    ) -> Result<(), WriteError<<P::BaseWriter<'_> as Writer>::Error>>
+    where
+        D: ToWriter,
+    {
         let mut writer = self.provider.write_stream();
-        response.to_writer(&mut writer)?;
+        data.to_writer(&mut writer)?;
         writer.flush().map_err(WriteError::StreamError)?;
         Ok(())
     }
@@ -223,14 +231,7 @@ impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProto
     where
         String: AsRef<str>,
     {
-        use crate::traits::asynchronous::{AsyncToWriter, AsyncWriter};
-        let mut writer = self.provider.async_write_stream();
-        response.async_to_writer(&mut writer).await?;
-        writer
-            .async_flush()
-            .await
-            .map_err(WriteError::StreamError)?;
-        Ok(())
+        self.async_write_raw(response).await
     }
 
     /// Writes a version 1.3 and previous ping response to the stream.
@@ -244,9 +245,23 @@ impl<P: crate::traits::asynchronous::AsyncWriteStreamProvider, S: HandshakeProto
     where
         String: AsRef<str>,
     {
-        use crate::traits::asynchronous::{AsyncToWriter, AsyncWriter};
+        self.async_write_raw(response).await
+    }
+
+    /// Writes raw data to the underlying stream
+    pub async fn async_write_raw<D>(
+        &mut self,
+        data: &D,
+    ) -> Result<
+        (),
+        WriteError<<P::AsyncBaseWriter<'_> as crate::traits::asynchronous::AsyncWriter>::Error>,
+    >
+    where
+        D: crate::traits::asynchronous::AsyncToWriter,
+    {
+        use crate::traits::asynchronous::AsyncWriter;
         let mut writer = self.provider.async_write_stream();
-        response.async_to_writer(&mut writer).await?;
+        data.async_to_writer(&mut writer).await?;
         writer
             .async_flush()
             .await

@@ -1,20 +1,19 @@
-#[cfg(feature = "async")]
-use crate::traits::asynchronous::{AsyncFromReader, AsyncReader, AsyncToWriter, AsyncWriter};
-use crate::{
-    error::{ReadError, WriteError},
-    traits::{FromReader, Reader, Serializable, ToWriter, Writer},
-};
-
+pub mod array;
+mod bool;
 pub mod handshake_version;
+mod option;
+mod str;
+mod tuple;
 pub mod varint;
 
+#[doc(hidden)]
 #[macro_export]
-macro_rules! from_reader_helper {
-    ($type:ident$(<$($generic:ident$(:$bound:path)?),+>)? {$($func:tt)+}) => {
-        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::FromReader for $type$(<$($generic),+>)? {
+macro_rules! _from_reader_helper_internal {
+    (sync $type:path: bounds: ($($($bound:tt)+)?), {$($func:tt)+}) => {
+        impl$(<$($bound)+>)? $crate::traits::FromReader for $type {
             fn from_reader<R>(reader: &mut R) -> Result<Self, $crate::error::ReadError<R::Error>>
             where
-                R: $crate::traits::Reader,
+                R: $crate::traits::Reader
             {
                 #[allow(unused_macros)]
                 macro_rules! read_bytes {
@@ -22,7 +21,12 @@ macro_rules! from_reader_helper {
                         let mut buf = [0u8; $count];
                         reader.read_exact(&mut buf).map_err($crate::error::ReadError::StreamError)?;
                         buf
-                    }}
+                    }};
+                    ($count:ident) => {{
+                        let mut buf = [0u8; $count];
+                        reader.read_exact(&mut buf).map_err($crate::error::ReadError::StreamError)?;
+                        buf
+                    }};
                 }
 
                 #[allow(unused_macros)]
@@ -40,14 +44,14 @@ macro_rules! from_reader_helper {
                 $($func)+
             }
         }
-
-        #[cfg(feature = "async")]
-        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::asynchronous::AsyncFromReader for $type$(<$($generic),+>)? {
+    };
+    (async $type:path: bounds: ($($($bound:tt)+)?), {$($func:tt)+}) => {
+        impl$(<$($bound)+>)? $crate::traits::asynchronous::AsyncFromReader for $type {
             async fn async_from_reader<R>(
                 reader: &mut R,
             ) -> Result<Self, $crate::error::ReadError<R::Error>>
             where
-                R: $crate::traits::asynchronous::AsyncReader,
+                R: $crate::traits::asynchronous::AsyncReader
             {
                 #[allow(unused_macros)]
                 macro_rules! read_bytes {
@@ -55,7 +59,12 @@ macro_rules! from_reader_helper {
                         let mut buf = [0u8; $count];
                         reader.async_read_exact(&mut buf).await.map_err($crate::error::ReadError::StreamError)?;
                         buf
-                    }}
+                    }};
+                    ($count:ident) => {{
+                        let mut buf = [0u8; $count];
+                        reader.async_read_exact(&mut buf).await.map_err($crate::error::ReadError::StreamError)?;
+                        buf
+                    }};
                 }
 
                 #[allow(unused_macros)]
@@ -77,9 +86,26 @@ macro_rules! from_reader_helper {
 }
 
 #[macro_export]
-macro_rules! to_writer_helper {
-    ($type:ident$(<$($generic:ident$(:$bound:path)?),+>)?, $this:ident {$($func:tt)+}) => {
-        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::ToWriter for $type$(<$($generic),+>)? {
+macro_rules! from_reader_helper {
+    ($type:path $(where ($($bounds:tt)+))? {$($func:tt)+}) => {
+        $crate::_from_reader_helper_internal!(sync $type: bounds: ($($($bounds)+)?), {$($func)+});
+
+        #[cfg(feature = "async")]
+        $crate::_from_reader_helper_internal!(async $type: bounds: ($($($bounds)+)?), {$($func)+});
+    };
+    ($type:path $(where ($($bounds:tt)+))?, wrapped <$($generic:ident),+> {$($func:tt)+}) => {
+        $crate::_from_reader_helper_internal!(sync $type: bounds: ($($generic: $crate::traits::FromReader),+ $(,$($bounds)+)?), {$($func)+});
+
+        #[cfg(feature = "async")]
+        $crate::_from_reader_helper_internal!(async $type: bounds: ($($generic: $crate::traits::asynchronous::AsyncFromReader),+ $(,$($bounds)+)?), {$($func)+});
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! _to_writer_helper_internal {
+    (sync $type:path: bounds: ($($($bound:tt)+)?), $this:ident {$($func:tt)+}) => {
+        impl$(<$($bound)+>)? $crate::traits::ToWriter for $type {
             fn to_writer<W>(
                 &self,
                 writer: &mut W,
@@ -98,16 +124,16 @@ macro_rules! to_writer_helper {
 
                 #[allow(unused_macros)]
                 macro_rules! write {
-                    ($write_type:ty, $value:expr) => (<$write_type as $crate::traits::ToWriter>::to_writer($value, writer)?)
+                    ($write_type:ty, $value:expr) => (<$write_type as $crate::traits::ToWriter>::to_writer(&$value, writer)?)
                 }
 
                 let $this = self;
                 $($func)+
             }
         }
-
-        #[cfg(feature = "async")]
-        impl$(<$($generic$(:$bound)?),+>)? $crate::traits::asynchronous::AsyncToWriter for $type$(<$($generic),+>)? {
+    };
+    (async $type:path: bounds: ($($($bound:tt)+)?), $this:ident {$($func:tt)+}) => {
+        impl$(<$($bound)+>)? $crate::traits::asynchronous::AsyncToWriter for $type {
             async fn async_to_writer<W>(
                 &self,
                 writer: &mut W,
@@ -126,13 +152,29 @@ macro_rules! to_writer_helper {
 
                 #[allow(unused_macros)]
                 macro_rules! write {
-                    ($write_type:ty, $value:expr) => (<$write_type as $crate::traits::asynchronous::AsyncToWriter>::async_to_writer($value, writer).await?)
+                    ($write_type:ty, $value:expr) => (<$write_type as $crate::traits::asynchronous::AsyncToWriter>::async_to_writer(&$value, writer).await?)
                 }
 
                 let $this = self;
                 $($func)+
             }
         }
+    }
+}
+
+#[macro_export]
+macro_rules! to_writer_helper {
+    ($type:path $(where ($($bounds:tt)+))?, ($this:ident){$($func:tt)+}) => {
+        $crate::_to_writer_helper_internal!(sync $type: bounds: ($($($bounds)+)?), $this {$($func)*});
+
+        #[cfg(feature = "async")]
+        $crate::_to_writer_helper_internal!(async $type: bounds: ($($($bounds)+)?), $this {$($func)*});
+    };
+    ($type:path $(where ($($bounds:tt)+))?, wrapped <$($generic:ident),+>, ($this:ident){$($func:tt)+}) => {
+        $crate::_to_writer_helper_internal!(sync $type: bounds: ($($generic: $crate::traits::ToWriter),+ $(,$($bounds)+)?), $this {$($func)+});
+
+        #[cfg(feature = "async")]
+        $crate::_to_writer_helper_internal!(async $type: bounds: ($($generic: $crate::traits::asynchronous::AsyncToWriter),+ $(,$($bounds)+)?), $this {$($func)+});
     };
 }
 
@@ -151,7 +193,7 @@ macro_rules! build_primative {
             }
         }
 
-        $crate::to_writer_helper!($type, this {
+        $crate::to_writer_helper!($type, (this){
             let bytes = this.to_be_bytes();
             write_bytes!(&bytes);
             Ok(())
@@ -171,108 +213,3 @@ build_primative!(u128, 16);
 build_primative!(i128, 16);
 build_primative!(f32, 4);
 build_primative!(f64, 8);
-
-impl Serializable for bool {
-    #[inline]
-    fn size(&self) -> usize {
-        1
-    }
-}
-
-from_reader_helper!(bool {
-    let byte = read!(u8);
-    Ok(byte != 0)
-});
-
-to_writer_helper!(bool, this {
-    let byte = if *this {0x01} else {0x00};
-    write!(u8, &byte);
-    Ok(())
-});
-
-impl<T> Serializable for Option<T>
-where
-    T: Serializable,
-{
-    #[inline]
-    fn size(&self) -> usize {
-        match self {
-            Some(val) => 1 + val.size(),
-            None => 1,
-        }
-    }
-}
-
-impl<T> FromReader for Option<T>
-where
-    T: FromReader,
-{
-    fn from_reader<R>(reader: &mut R) -> Result<Self, ReadError<R::Error>>
-    where
-        R: Reader,
-    {
-        Ok(if bool::from_reader(reader)? {
-            Some(T::from_reader(reader)?)
-        } else {
-            None
-        })
-    }
-}
-
-#[cfg(feature = "async")]
-impl<T> AsyncFromReader for Option<T>
-where
-    T: AsyncFromReader,
-{
-    async fn async_from_reader<R>(reader: &mut R) -> Result<Self, ReadError<R::Error>>
-    where
-        R: AsyncReader,
-    {
-        Ok(if bool::async_from_reader(reader).await? {
-            Some(T::async_from_reader(reader).await?)
-        } else {
-            None
-        })
-    }
-}
-
-impl<T> ToWriter for Option<T>
-where
-    T: ToWriter,
-{
-    fn to_writer<W>(&self, writer: &mut W) -> Result<(), WriteError<W::Error>>
-    where
-        W: Writer,
-    {
-        match self {
-            Some(val) => {
-                true.to_writer(writer)?;
-                val.to_writer(writer)?;
-            }
-            None => false.to_writer(writer)?,
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(feature = "async")]
-impl<T> AsyncToWriter for Option<T>
-where
-    T: AsyncToWriter,
-{
-    async fn async_to_writer<W>(&self, writer: &mut W) -> Result<(), WriteError<W::Error>>
-    where
-        W: AsyncWriter,
-    {
-        match self {
-            Some(val) => {
-                true.async_to_writer(writer).await?;
-                val.async_to_writer(writer).await?;
-            }
-            None => false.async_to_writer(writer).await?,
-        }
-
-        Ok(())
-    }
-}

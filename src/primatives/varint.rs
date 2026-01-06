@@ -54,7 +54,7 @@ impl Serializable for VarInt {
     }
 }
 
-to_writer_helper!(VarInt, this {
+to_writer_helper!(VarInt, (this){
     let mut buf = [0u8; 5];
     for (index, byte) in buf.iter_mut().enumerate() {
         let remaining = (this.0 as u32) >> (index * 7);
