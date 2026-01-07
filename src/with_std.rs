@@ -1,8 +1,26 @@
 use core::time::Duration;
 
-use crate::traits::{Reader, SetBlocking, Writer};
+use crate::{
+    from_reader_helper,
+    traits::{Reader, SetBlocking, Writer},
+};
 
 extern crate std;
+
+from_reader_helper!(std::boxed::Box<T>, wrapped<T> {
+    let value = read!(T);
+    Ok(std::boxed::Box::new(value))
+});
+
+from_reader_helper!(std::rc::Rc<T>, wrapped<T> {
+    let value = read!(T);
+    Ok(std::rc::Rc::new(value))
+});
+
+from_reader_helper!(std::sync::Arc<T>, wrapped<T> {
+    let value = read!(T);
+    Ok(std::sync::Arc::new(value))
+});
 
 impl<R> SetBlocking for std::io::BufReader<R>
 where
