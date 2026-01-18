@@ -1,10 +1,8 @@
 extern crate std;
 
-use aes::cipher::{
-    BlockDecryptMut, BlockEncryptMut, KeyIvInit, generic_array::GenericArray, inout::InOutBuf,
-};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, inout::InOutBuf};
 use miniz_oxide::{
-    DataFormat, MZFlush,
+    DataFormat, MZFlush, MZStatus,
     deflate::{
         core::{CompressorOxide, deflate_flags},
         stream::deflate,
@@ -102,7 +100,7 @@ where
 pub struct EncryptionWriter<W> {
     encryptor: cfb8::Encryptor<aes::Aes128>,
     writer: W,
-    last_byte: Option<u8>,
+    buffer: std::vec::Vec<u8>,
 }
 
 impl<W> std::io::Write for EncryptionWriter<W>
@@ -110,35 +108,35 @@ where
     W: std::io::Write,
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Lots of small writes; we'll want to recommend using a `BufWriter`
-        let mut total_written = 0;
+        let mut capacity = self.buffer.capacity() - self.buffer.len();
+        if capacity == 0 {
+            let io_buf: InOutBuf<u8> = (self.buffer.as_mut_slice()).into();
+            let (chunks, tail) = io_buf.into_chunks();
+            // SAFETY: Our chunk size is 1 byte. There will never be a tail.
+            assert!(tail.is_empty());
+            self.encryptor.encrypt_blocks_inout_mut(chunks);
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
 
-        if let Some(byte) = self.last_byte {
-            let amount_written = self.writer.write(&[byte])?;
-            if amount_written == 0 {
-                return Ok(0);
-            }
-
-            self.last_byte = None;
-            total_written += 1;
+            capacity = self.buffer.capacity();
         }
 
-        for byte in buf {
-            let mut chunk = GenericArray::from([*byte]);
-            self.encryptor.encrypt_block_inout_mut((&mut chunk).into());
-            let amount_written = self.writer.write(&chunk)?;
-            if amount_written == 0 {
-                self.last_byte = Some(chunk[0]);
-                return Ok(total_written);
-            } else {
-                total_written += amount_written;
-            }
-        }
-
-        Ok(total_written)
+        let amount_to_write = capacity.min(buf.len());
+        self.buffer.extend_from_slice(&buf[..amount_to_write]);
+        Ok(amount_to_write)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            let io_buf: InOutBuf<u8> = (self.buffer.as_mut_slice()).into();
+            let (chunks, tail) = io_buf.into_chunks();
+            // SAFETY: Our chunk size is 1 byte. There will never be a tail.
+            assert!(tail.is_empty());
+            self.encryptor.encrypt_blocks_inout_mut(chunks);
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
+
         self.writer.flush()
     }
 }
@@ -279,8 +277,41 @@ where
     }
 }
 
+pub struct BufferedWriter<W> {
+    writer: W,
+    buffer: std::vec::Vec<u8>,
+}
+
+impl<W> std::io::Write for BufferedWriter<W>
+where
+    W: std::io::Write,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut capacity = self.buffer.capacity() - self.buffer.len();
+        if capacity == 0 {
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+
+            capacity = self.buffer.capacity();
+        }
+
+        let amount_to_write = capacity.min(buf.len());
+        self.buffer.extend_from_slice(&buf[..amount_to_write]);
+        Ok(amount_to_write)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
+
+        self.writer.flush()
+    }
+}
+
 pub enum DefaultWriterState<W> {
-    Standard(W),
+    Standard(std::boxed::Box<BufferedWriter<W>>),
     Encrypt(std::boxed::Box<EncryptionWriter<W>>),
     Poisoned,
 }
@@ -293,11 +324,15 @@ pub struct DefaultWriter<W> {
 impl<W> DefaultWriter<W> {
     fn with_encryption(&mut self, key: &[u8; 16]) {
         match std::mem::replace(&mut self.writer, DefaultWriterState::Poisoned) {
-            DefaultWriterState::Standard(writer) => {
+            DefaultWriterState::Standard(buf_write) => {
+                let writer = buf_write.writer;
+                let mut buffer = buf_write.buffer;
+                buffer.clear();
+
                 let encryption_writer = EncryptionWriter {
                     encryptor: cfb8::Encryptor::new(key.into(), key.into()),
                     writer,
-                    last_byte: None,
+                    buffer,
                 };
                 self.writer = DefaultWriterState::Encrypt(std::boxed::Box::new(encryption_writer));
             }
@@ -313,7 +348,9 @@ where
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match &mut self.writer {
-            DefaultWriterState::Standard(writer) => writer.write(buf),
+            DefaultWriterState::Standard(writer) => {
+                <std::boxed::Box<BufferedWriter<W>> as std::io::Write>::write(writer, buf)
+            }
             DefaultWriterState::Encrypt(writer) => {
                 <std::boxed::Box<EncryptionWriter<W>> as std::io::Write>::write(writer, buf)
             }
@@ -323,7 +360,9 @@ where
 
     fn flush(&mut self) -> std::io::Result<()> {
         match &mut self.writer {
-            DefaultWriterState::Standard(writer) => writer.flush(),
+            DefaultWriterState::Standard(writer) => {
+                <std::boxed::Box<BufferedWriter<W>> as std::io::Write>::flush(writer)
+            }
             DefaultWriterState::Encrypt(writer) => {
                 <std::boxed::Box<EncryptionWriter<W>> as std::io::Write>::flush(writer)
             }
@@ -335,31 +374,68 @@ where
 pub struct CachedPreCompressionWriter<'a> {
     state: &'a mut CompressorOxide,
     buffer: std::vec::Vec<u8>,
+    written: usize,
 }
 
 impl Writer for CachedPreCompressionWriter<'_> {
     type Error = std::io::Error;
 
     fn write(&mut self, data: &[u8]) -> Result<(), Self::Error> {
-        let mut offset = 0;
-        let mut buf = [0u8; 512];
+        let mut consumed = 0;
+        self.buffer
+            .resize(self.buffer.len() + 2.max(data.len() / 2), 0);
         loop {
-            let result = deflate(self.state, &data[offset..], &mut buf, MZFlush::Sync);
+            let result = deflate(
+                self.state,
+                &data[consumed..],
+                &mut self.buffer[self.written..],
+                MZFlush::None,
+            );
             let _ = result.status.map_err(|err| {
-                std::io::Error::other(std::format!("Compression error: {:?}", err))
+                std::io::Error::other(std::format!("Write compression error: {:?}", err))
             })?;
 
-            self.buffer.extend_from_slice(&buf[..result.bytes_written]);
-            offset += result.bytes_consumed;
-            if offset == data.len() {
+            consumed += result.bytes_consumed;
+            self.written += result.bytes_written;
+            if consumed == data.len() {
                 break;
+            }
+
+            let guess = 2.max((data.len().saturating_sub(consumed)) - 2);
+            if self.buffer.len().saturating_sub(self.written) < guess {
+                // We need more space, so resize the buffer
+                self.buffer.resize(self.buffer.len() + guess, 0);
             }
         }
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        // Handled in `Self::finish`
+        if self.buffer.len() == self.written {
+            // We need more space, so resize the buffer
+            self.buffer.resize(2.max(self.buffer.len() * 2), 0);
+        }
+
+        loop {
+            let result = deflate(
+                self.state,
+                &[],
+                &mut self.buffer[self.written..],
+                MZFlush::Finish,
+            );
+            let status = result.status.map_err(|err| {
+                std::io::Error::other(std::format!("Flush compression error: {:?}", err))
+            })?;
+            self.written += result.bytes_written;
+
+            if matches!(status, MZStatus::StreamEnd) {
+                self.buffer.truncate(self.written);
+                break;
+            }
+
+            // We need more space, so resize the buffer
+            self.buffer.resize(self.buffer.len() * 2, 0);
+        }
         Ok(())
     }
 }
@@ -428,6 +504,7 @@ where
         CachedPreCompressionWriter {
             state: compressor,
             buffer: std::vec::Vec::new(),
+            written: 0,
         }
     }
 
@@ -438,7 +515,7 @@ where
 
 pub struct DefaultStreamProvider<R, W: std::io::Write> {
     reader: std::io::BufReader<DefaultReader<R>>,
-    writer: DefaultWriter<std::io::BufWriter<W>>,
+    writer: DefaultWriter<W>,
     compression_threshold: Option<usize>,
     compression_level: Compression,
     decompression_state: std::boxed::Box<InflateState>,
@@ -459,10 +536,10 @@ impl<R: std::io::Read, W: std::io::Write> DefaultStreamProvider<R, W> {
         Self {
             reader: std::io::BufReader::with_capacity(buffer_size, DefaultReader::Standard(reader)),
             writer: DefaultWriter {
-                writer: DefaultWriterState::Standard(std::io::BufWriter::with_capacity(
-                    buffer_size,
+                writer: DefaultWriterState::Standard(std::boxed::Box::new(BufferedWriter {
                     writer,
-                )),
+                    buffer: std::vec::Vec::with_capacity(buffer_size),
+                })),
                 compression_state,
             },
             compression_threshold: None,
@@ -515,7 +592,7 @@ impl<R: std::io::Read + SetBlocking<BlockingError = std::io::Error>, W: std::io:
 impl<R: std::io::Read, W: std::io::Write> WriteStreamProvider for DefaultStreamProvider<R, W> {
     type Error = std::io::Error;
     type BaseWriter<'a>
-        = &'a mut DefaultWriter<std::io::BufWriter<W>>
+        = &'a mut DefaultWriter<W>
     where
         Self: 'a;
 
