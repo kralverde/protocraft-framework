@@ -314,7 +314,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
+    ) -> Poll<tokio::io::Result<usize>> {
         let this = self.get_mut();
 
         loop {
@@ -343,7 +343,7 @@ where
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<tokio::io::Result<()>> {
         let this = self.get_mut();
 
         loop {
@@ -367,7 +367,7 @@ where
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<tokio::io::Result<()>> {
         let writer = &mut self.get_mut().writer;
         tokio::pin!(writer);
         writer.poll_shutdown(cx)
