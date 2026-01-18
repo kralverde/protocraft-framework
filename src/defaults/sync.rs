@@ -108,7 +108,7 @@ where
     W: std::io::Write,
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut capacity = self.buffer.capacity() - self.buffer.len();
+        let mut capacity = self.buffer.capacity().saturating_sub(self.buffer.len());
         if capacity == 0 {
             let io_buf: InOutBuf<u8> = (self.buffer.as_mut_slice()).into();
             let (chunks, tail) = io_buf.into_chunks();
@@ -287,7 +287,7 @@ where
     W: std::io::Write,
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut capacity = self.buffer.capacity() - self.buffer.len();
+        let mut capacity = self.buffer.capacity().saturating_sub(self.buffer.len());
         if capacity == 0 {
             self.writer.write_all(&self.buffer)?;
             self.buffer.clear();

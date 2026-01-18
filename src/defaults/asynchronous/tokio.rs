@@ -5,9 +5,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use aes::cipher::{
-    BlockDecryptMut, BlockEncryptMut, KeyIvInit, generic_array::GenericArray, inout::InOutBuf,
-};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, inout::InOutBuf};
 use miniz_oxide::{
     DataFormat, MZFlush,
     deflate::{
@@ -17,8 +15,7 @@ use miniz_oxide::{
     inflate::stream::{InflateState, MinReset, inflate},
 };
 use tokio::io::{
-    AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
-    ReadBuf, Take,
+    AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf, Take,
 };
 
 use crate::{
@@ -162,16 +159,16 @@ where
     }
 }
 
+pub enum AsyncBufferedWriterState {
+    Fill,
+    Write(usize),
+}
+
 pub struct AsyncEncryptionWriter<W> {
     encryptor: cfb8::Encryptor<aes::Aes128>,
     writer: W,
-    last_byte: Option<u8>,
-}
-
-impl<W> AsyncEncryptionWriter<W> {
-    fn deconstruct(&mut self) -> (&mut cfb8::Encryptor<aes::Aes128>, &mut W, &mut Option<u8>) {
-        (&mut self.encryptor, &mut self.writer, &mut self.last_byte)
-    }
+    buffer: std::vec::Vec<u8>,
+    state: AsyncBufferedWriterState,
 }
 
 impl<W> AsyncWrite for AsyncEncryptionWriter<W>
@@ -179,63 +176,80 @@ where
     W: AsyncWrite + Unpin,
 {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, tokio::io::Error>> {
-        // Lots of small writes; we'll want to recommend using a `AsyncBufWriter`
-        let mut total_written = 0;
+        let this = self.get_mut();
 
-        let (encryptor, writer, last_byte) = self.deconstruct();
-        tokio::pin!(writer);
-
-        if let Some(byte) = last_byte {
-            let result = writer.as_mut().poll_write(cx, &[*byte]);
-            let Poll::Ready(Ok(amount_written)) = result else {
-                return result;
-            };
-
-            *last_byte = None;
-            total_written += amount_written;
-        }
-
-        for byte in buf {
-            let mut chunk = GenericArray::from([*byte]);
-            encryptor.encrypt_block_inout_mut((&mut chunk).into());
-            let result = writer.as_mut().poll_write(cx, &chunk);
-            match result {
-                Poll::Ready(result) => match result {
-                    Ok(amount_written) => {
-                        total_written += amount_written;
+        loop {
+            match &mut this.state {
+                AsyncBufferedWriterState::Fill => {
+                    let capacity = this.buffer.capacity().saturating_sub(this.buffer.len());
+                    if capacity > 0 {
+                        let amount_to_write = capacity.min(buf.len());
+                        this.buffer.extend_from_slice(&buf[..amount_to_write]);
+                        return Poll::Ready(Ok(amount_to_write));
                     }
-                    Err(err) => {
-                        return Poll::Ready(Err(err));
+
+                    let io_buf: InOutBuf<u8> = (this.buffer.as_mut_slice()).into();
+                    let (chunks, tail) = io_buf.into_chunks();
+                    // SAFETY: Our chunk size is 1 byte. There will never be a tail.
+                    assert!(tail.is_empty());
+                    this.encryptor.encrypt_blocks_inout_mut(chunks);
+                    this.state = AsyncBufferedWriterState::Write(0);
+                }
+                AsyncBufferedWriterState::Write(offset) => {
+                    let fut = this.writer.write(&this.buffer[*offset..]);
+                    tokio::pin!(fut);
+                    let amount_written = core::task::ready!(fut.poll(cx))?;
+                    *offset += amount_written;
+                    if *offset == this.buffer.len() {
+                        this.buffer.clear();
+                        this.state = AsyncBufferedWriterState::Fill;
                     }
-                },
-                Poll::Pending => {
-                    *last_byte = Some(chunk[0]);
-                    return Poll::Ready(Ok(total_written));
                 }
             }
         }
-
-        Poll::Ready(Ok(total_written))
     }
 
     fn poll_flush(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), tokio::io::Error>> {
-        let writer = &mut self.as_mut().writer;
-        tokio::pin!(writer);
-        writer.poll_flush(cx)
+        let this = self.get_mut();
+
+        loop {
+            match &mut this.state {
+                AsyncBufferedWriterState::Fill => {
+                    let io_buf: InOutBuf<u8> = (this.buffer.as_mut_slice()).into();
+                    let (chunks, tail) = io_buf.into_chunks();
+                    // SAFETY: Our chunk size is 1 byte. There will never be a tail.
+                    assert!(tail.is_empty());
+                    this.encryptor.encrypt_blocks_inout_mut(chunks);
+                    this.state = AsyncBufferedWriterState::Write(0);
+                }
+                AsyncBufferedWriterState::Write(offset) => {
+                    let fut = this.writer.write(&this.buffer[*offset..]);
+                    tokio::pin!(fut);
+                    let amount_written = core::task::ready!(fut.poll(cx))?;
+                    *offset += amount_written;
+                    if *offset == this.buffer.len() {
+                        this.buffer.clear();
+                        this.state = AsyncBufferedWriterState::Fill;
+
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+            }
+        }
     }
 
     fn poll_shutdown(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), tokio::io::Error>> {
-        let writer = &mut self.as_mut().writer;
+        let writer = &mut self.get_mut().writer;
         tokio::pin!(writer);
         writer.poll_shutdown(cx)
     }
@@ -286,8 +300,82 @@ where
     }
 }
 
+pub struct AsyncBufferedWriter<W> {
+    writer: W,
+    buffer: std::vec::Vec<u8>,
+    state: AsyncBufferedWriterState,
+}
+
+impl<W> AsyncWrite for AsyncBufferedWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+
+        loop {
+            match &mut this.state {
+                AsyncBufferedWriterState::Fill => {
+                    let capacity = this.buffer.capacity().saturating_sub(this.buffer.len());
+                    if capacity > 0 {
+                        let amount_to_write = capacity.min(buf.len());
+                        this.buffer.extend_from_slice(&buf[..amount_to_write]);
+                        return Poll::Ready(Ok(amount_to_write));
+                    }
+
+                    this.state = AsyncBufferedWriterState::Write(0);
+                }
+                AsyncBufferedWriterState::Write(offset) => {
+                    let fut = this.writer.write(&this.buffer[*offset..]);
+                    tokio::pin!(fut);
+                    let amount_written = core::task::ready!(fut.poll(cx))?;
+                    *offset += amount_written;
+                    if *offset == this.buffer.len() {
+                        this.buffer.clear();
+                        this.state = AsyncBufferedWriterState::Fill;
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        loop {
+            match &mut this.state {
+                AsyncBufferedWriterState::Fill => {
+                    this.state = AsyncBufferedWriterState::Write(0);
+                }
+                AsyncBufferedWriterState::Write(offset) => {
+                    let fut = this.writer.write(&this.buffer[*offset..]);
+                    tokio::pin!(fut);
+                    let amount_written = core::task::ready!(fut.poll(cx))?;
+                    *offset += amount_written;
+                    if *offset == this.buffer.len() {
+                        this.buffer.clear();
+                        this.state = AsyncBufferedWriterState::Fill;
+
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let writer = &mut self.get_mut().writer;
+        tokio::pin!(writer);
+        writer.poll_shutdown(cx)
+    }
+}
+
 pub enum AsyncDefaultWriter<W> {
-    Standard(W),
+    Standard(std::boxed::Box<AsyncBufferedWriter<W>>),
     Encrypt(std::boxed::Box<AsyncEncryptionWriter<W>>),
     Poisoned,
 }
@@ -295,11 +383,16 @@ pub enum AsyncDefaultWriter<W> {
 impl<W> AsyncDefaultWriter<W> {
     fn with_encryption(&mut self, key: &[u8; 16]) {
         match std::mem::replace(self, Self::Poisoned) {
-            Self::Standard(writer) => {
+            Self::Standard(buf_write) => {
+                let writer = buf_write.writer;
+                let mut buffer = buf_write.buffer;
+                buffer.clear();
+
                 let encryption_writer = AsyncEncryptionWriter {
                     encryptor: cfb8::Encryptor::new(key.into(), key.into()),
                     writer,
-                    last_byte: None,
+                    buffer,
+                    state: AsyncBufferedWriterState::Fill,
                 };
                 *self = Self::Encrypt(std::boxed::Box::new(encryption_writer));
             }
@@ -631,7 +724,7 @@ where
 /// The default stream provider for Tokio.
 pub struct AsyncDefaultStreamProvider<R, W> {
     reader: BufReader<AsyncDefaultReader<R>>,
-    writer: AsyncDefaultWriter<BufWriter<W>>,
+    writer: AsyncDefaultWriter<W>,
     compression_threshold: Option<usize>,
     compression_level: Compression,
     compression_state: std::boxed::Box<CompressorOxide>,
@@ -652,7 +745,11 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite> AsyncDefaultStreamProvider<R, W> {
 
         Self {
             reader: BufReader::with_capacity(buffer_size, AsyncDefaultReader::Standard(reader)),
-            writer: AsyncDefaultWriter::Standard(BufWriter::with_capacity(buffer_size, writer)),
+            writer: AsyncDefaultWriter::Standard(std::boxed::Box::new(AsyncBufferedWriter {
+                writer,
+                buffer: std::vec::Vec::with_capacity(buffer_size),
+                state: AsyncBufferedWriterState::Fill,
+            })),
             compression_threshold: None,
             compression_level,
             decompression_state: InflateState::new_boxed(DataFormat::Zlib),
@@ -704,7 +801,7 @@ impl<R, W: AsyncWrite + Unpin> AsyncWriteStreamProvider for AsyncDefaultStreamPr
     type Error = tokio::io::Error;
 
     type AsyncBaseWriter<'a>
-        = TokioIo<TokioWriter<'a, &'a mut AsyncDefaultWriter<BufWriter<W>>>>
+        = TokioIo<TokioWriter<'a, &'a mut AsyncDefaultWriter<W>>>
     where
         Self: 'a;
 
