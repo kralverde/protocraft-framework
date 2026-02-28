@@ -98,7 +98,7 @@ tokio = { version = "1.49.0", optional = true, default-features = false, feature
   "io-util",
   "time",
 ] }
-futures-io = { version = "0.3.31", optional = true, default-features = false, features = [
+futures-io = { version = "0.3.32", optional = true, default-features = false, features = [
   "std",
 ] }
 futures-util = { version = "0.3.31", optional = true, default-features = false, features = [
